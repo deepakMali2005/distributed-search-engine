@@ -1,6 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
+from collections import deque
 
 
 class Crawler:
@@ -13,7 +14,7 @@ class Crawler:
     def parse(self, html: str, base_url: str) -> dict:
         soup = BeautifulSoup(html, "html.parser")
 
-        title = soup.title.string if soup.title else ""
+        title = soup.title.string.strip() if soup.title and soup.title.string else ""
 
         text = soup.get_text(separator=" ", strip=True)
 
@@ -29,7 +30,35 @@ class Crawler:
             "links": links,
         }
 
-    def crawl(self, url: str) -> dict:
-        html = self.fetch(url)
+    def crawl(self, start_url: str, max_pages: int = 10) -> list[dict]:
+        queue = deque([start_url])
+        visited = set()
+        documents = []
 
-        return self.parse(html, url)
+        while queue and len(visited) < max_pages:
+            url = queue.popleft()
+
+            if url in visited:
+                continue
+
+            try:
+                html = self.fetch(url)
+            except requests.RequestException:
+                visited.add(url)
+                continue
+
+            visited.add(url)
+
+            document = self.parse(html, url)
+
+            documents.append({
+                "url": url,
+                "title": document["title"],
+                "text": document["text"],
+            })
+
+            for link in document["links"]:
+                if link not in visited:
+                    queue.append(link)
+
+        return documents
