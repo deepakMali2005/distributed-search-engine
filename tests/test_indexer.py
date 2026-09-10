@@ -6,10 +6,13 @@ from services.indexer.indexer import Indexer
 def test_index_single_document():
     db = SessionLocal()
 
+    url = "https://example.com/indexer-test"
+    document = None
+
     try:
         document = save_document(
             db=db,
-            url="https://example.com/indexer-test",
+            url=url,
             title="Indexer Test",
             content="Python is a powerful programming language.",
             content_type="text/html",
@@ -28,8 +31,11 @@ def test_index_single_document():
         assert postings[0].term_frequency == 1
 
     finally:
-        db.close()
+        if document is not None:
+            db.delete(document)
+            db.commit()
 
+        db.close()
 
 def test_index_multiple_documents():
     db = SessionLocal()

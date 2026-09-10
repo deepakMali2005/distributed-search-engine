@@ -1,6 +1,5 @@
 from services.indexer.index import InvertedIndex
 
-
 def test_add_document_creates_posting():
     index = InvertedIndex()
 
@@ -108,3 +107,29 @@ def test_unknown_term():
     index.add_document(1, ["python"])
 
     assert index.get_postings("doesnotexist") == []
+
+
+
+
+def test_document_frequency():
+    index = InvertedIndex()
+
+    index.add_document(
+        doc_id=1,
+        tokens=["python", "search"],
+    )
+
+    index.add_document(
+        doc_id=2,
+        tokens=["python", "database"],
+    )
+
+    index.add_document(
+        doc_id=3,
+        tokens=["search"],
+    )
+
+    assert index.document_frequency("python") == 2
+    assert index.document_frequency("search") == 2
+    assert index.document_frequency("database") == 1
+    assert index.document_frequency("unknown") == 0

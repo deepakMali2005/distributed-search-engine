@@ -36,6 +36,9 @@ class InvertedIndex:
                 )
             }
         }
+
+    The index also maintains document-level statistics required
+    by the Search Engine and BM25 ranking.
     """
 
     def __init__(self) -> None:
@@ -101,19 +104,48 @@ class InvertedIndex:
         ]
 
     def document_length(self, doc_id: int) -> int:
-        """Return the number of tokens indexed for a document."""
+        """
+        Return the number of tokens indexed for a document.
+        """
+
         return self._document_lengths.get(doc_id, 0)
 
+    def document_frequency(self, term: str) -> int:
+        """
+        Return the number of documents containing the term.
+
+        This statistic is required by ranking algorithms such as BM25.
+        """
+
+        return len(self._postings.get(term, {}))
+
     def contains(self, term: str) -> bool:
-        """Return True if the term exists in the vocabulary."""
+        """
+        Return True if the term exists in the vocabulary.
+        """
+
         return term in self._postings
 
     @property
     def document_count(self) -> int:
-        """Return the number of indexed documents."""
+        """
+        Return the number of indexed documents.
+        """
+
         return len(self._document_lengths)
 
     @property
     def vocabulary_size(self) -> int:
-        """Return the number of unique terms."""
+        """
+        Return the number of unique terms.
+        """
+
         return len(self._postings)
+
+    
+    @property
+    def document_ids(self) -> set[int]:
+        """
+        Return all document IDs currently stored in the index.
+        """
+        return set(self._document_lengths)
