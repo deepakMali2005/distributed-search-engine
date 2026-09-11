@@ -11,39 +11,45 @@ class Document(Base):
 
     id: Mapped[int] = mapped_column(
         primary_key=True,
-        autoincrement=True
+        autoincrement=True,
     )
 
     url: Mapped[str] = mapped_column(
         String(2048),
         unique=True,
-        nullable=False
+        nullable=False,
     )
 
     title: Mapped[str | None] = mapped_column(
         String(500),
-        nullable=True
+        nullable=True,
     )
 
     content: Mapped[str] = mapped_column(
         Text,
-        nullable=False
+        nullable=False,
     )
 
     content_type: Mapped[str | None] = mapped_column(
         String(100),
-        nullable=True
+        nullable=True,
+    )
+
+    content_hash: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
-        nullable=False
+        nullable=False,
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
         onupdate=datetime.utcnow,
-        nullable=False
+        nullable=False,
     )

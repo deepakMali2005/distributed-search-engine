@@ -1,139 +1,98 @@
 """
-Crawler → Processor → Storage pipeline.
+Crawler → Processor → Storage → Indexer pipeline.
 
-This module connects the crawler, processor, and storage layers.
+Flow:
 
-The crawler is responsible for:
-    1. Fetching web pages.
-    2. Parsing their content.
-    3. Returning structured document data.
+    Crawler
+        ↓
+    Processor
+        ↓
+    Storage
+        ↓
+    Change Detection
+        ↓
+    Indexer
+        ↓
+    Inverted Index
 
-The processor is responsible for:
-    1. Cleaning raw text.
-    2. Normalizing whitespace.
-    3. Preparing document content for storage and later indexing.
+Storage determines whether each document is:
 
-The storage layer is responsible for:
-    1. Creating Document objects.
-    2. Saving them to PostgreSQL.
-    3. Retrieving existing documents.
+    CREATED
+    UPDATED
+    UNCHANGED
 
-This pipeline acts as the bridge between all three layers.
+Only CREATED and UPDATED documents are sent
+to the indexing layer.
 """
+
+from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from libs.common.document_events import DocumentChangeType
 from libs.models import Document
 from services.crawler.crawler import Crawler
 from services.processor.processor import clean_text
-from services.storage.storage import (
-    get_document_by_url,
-    save_document,
-)
+from services.storage.storage import save_document
+from services.indexer.indexer import Indexer
+
+
+@dataclass(frozen=True)
+class PipelineResult:
+    """
+    Result of processing one document through the pipeline.
+    """
+
+    document: Document
+    change_type: DocumentChangeType
+
+    @property
+    def changed(self) -> bool:
+        """
+        Return True when the document needs indexing.
+        """
+
+        return self.change_type in {
+            DocumentChangeType.CREATED,
+            DocumentChangeType.UPDATED,
+        }
 
 
 def crawl_and_store(
     db: Session,
     start_url: str,
     max_pages: int = 10,
-) -> list[Document]:
+    indexer: Indexer | None = None,
+) -> list[PipelineResult]:
     """
-    Crawl web pages, process their content, and store them in PostgreSQL.
+    Crawl, process, store, and optionally index documents.
 
-    The function performs the following steps:
+    CREATED documents are indexed.
 
-        Crawler
-            ↓
-        Crawl web pages
-            ↓
-        Extract raw document data
-            ↓
-        Processor
-            ↓
-        Clean and normalize text
-            ↓
-        Check whether document already exists
-            ↓
-        Storage
-            ↓
-        PostgreSQL
+    UPDATED documents are re-indexed.
 
-    Args:
-        db:
-            SQLAlchemy database session used to communicate with PostgreSQL.
+    UNCHANGED documents are not indexed.
 
-        start_url:
-            The URL from which the crawler should start.
-
-        max_pages:
-            Maximum number of pages the crawler should visit.
-
-    Returns:
-        A list of Document objects that were either newly saved
-        or already existed in the database.
+    The indexer is optional so the storage pipeline can still
+    be used independently when indexing is not required.
     """
 
-    # Create the crawler responsible for fetching and parsing
-    # web pages.
     crawler = Crawler()
 
-    # Crawl the website and receive structured document data.
-    #
-    # Each item returned by the crawler looks approximately like:
-    #
-    # {
-    #     "url": "https://example.com",
-    #     "title": "Example",
-    #     "text": "Page content..."
-    # }
     crawled_documents = crawler.crawl(
         start_url=start_url,
         max_pages=max_pages,
     )
 
-    # This list will contain the database Document objects
-    # corresponding to the crawled pages.
-    saved_documents: list[Document] = []
+    results: list[PipelineResult] = []
 
     for document in crawled_documents:
 
-        # Check whether this URL has already been stored.
-        #
-        # This prevents the same webpage from being inserted
-        # into PostgreSQL multiple times when the crawler is
-        # run again.
-        existing_document = get_document_by_url(
-            db=db,
-            url=document["url"],
-        )
-
-        if existing_document:
-            # The document already exists, so we don't insert
-            # another copy into the database.
-            saved_documents.append(existing_document)
-            continue
-
-        # The document does not exist yet.
-        #
-        # The crawler gives us raw text. Before storing it,
-        # send it through the processor.
-        #
-        # Example:
-        #
-        # Raw:
-        # "   Hello     Search Engine\n\nWorld   "
-        #
-        # Processed:
-        # "Hello Search Engine World"
         processed_text = clean_text(
             document["text"]
         )
 
-        # Store the processed document in PostgreSQL.
-        #
-        # The storage layer handles creating the SQLAlchemy
-        # Document object and committing it to the database.
-        saved_document = save_document(
+        saved_document, change_type = save_document(
             db=db,
             url=document["url"],
             title=document["title"],
@@ -141,8 +100,21 @@ def crawl_and_store(
             content_type="text/html",
         )
 
-        # Keep track of the document that was successfully
-        # stored in PostgreSQL.
-        saved_documents.append(saved_document)
+        # Only index documents that are new or changed.
+        if indexer is not None and change_type in {
+            DocumentChangeType.CREATED,
+            DocumentChangeType.UPDATED,
+        }:
+            indexer.index_document(
+                document_id=saved_document.id,
+                content=saved_document.content,
+            )
 
-    return saved_documents
+        results.append(
+            PipelineResult(
+                document=saved_document,
+                change_type=change_type,
+            )
+        )
+
+    return results

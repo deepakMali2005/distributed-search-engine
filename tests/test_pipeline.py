@@ -18,6 +18,8 @@ from unittest.mock import patch
 from services.pipeline.pipeline import crawl_and_store
 from services.search_api.database import SessionLocal
 from services.storage.storage import get_document_by_url
+from libs.common.document_events import DocumentChangeType
+from services.indexer.indexer import Indexer
 
 
 # A small HTML page used as fake crawler input.
@@ -81,10 +83,13 @@ def test_crawl_and_store():
         # The crawler should have produced exactly one document.
         assert len(documents) == 1
 
-        document = documents[0]
+        result = documents[0]
+
+        document = result.document
 
         # Verify that the crawler extracted the correct information.
         assert document.url == test_url
+
         assert document.title == "Distributed Search Engine"
         assert "This is a test document." in document.content
 
@@ -101,4 +106,240 @@ def test_crawl_and_store():
 
     finally:
         # Always close the database session, even if the test fails.
+        db.close()
+
+def test_pipeline_indexes_created_document():
+    db = SessionLocal()
+
+    test_url = "https://example.com/incremental-created"
+
+    try:
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = MOCK_HTML
+            mock_get.return_value.raise_for_status.return_value = None
+
+            indexer = Indexer()
+
+            results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                indexer=indexer,
+            )
+
+        assert len(results) == 1
+
+        result = results[0]
+
+        assert result.change_type == DocumentChangeType.CREATED
+        assert result.changed is True
+
+        postings = indexer.get_index().get_postings("test")
+
+        assert any(
+            posting.doc_id == result.document.id
+            for posting in postings
+        )
+
+    finally:
+        document = get_document_by_url(
+            db=db,
+            url=test_url,
+        )
+
+        if document is not None:
+            db.delete(document)
+            db.commit()
+
+        db.close()
+
+def test_pipeline_reindexes_updated_document():
+    db = SessionLocal()
+
+    test_url = "https://example.com/incremental-updated"
+
+    try:
+        indexer = Indexer()
+
+        first_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Original</title>
+        </head>
+        <body>
+            <p>Python programming language.</p>
+        </body>
+        </html>
+        """
+
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = first_html
+            mock_get.return_value.raise_for_status.return_value = None
+
+            first_results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                indexer=indexer,
+            )
+
+        first_result = first_results[0]
+
+        assert first_result.change_type == DocumentChangeType.CREATED
+
+        document_id = first_result.document.id
+
+        # Verify old content is indexed.
+        old_postings = indexer.get_index().get_postings(
+            "python"
+        )
+
+        assert any(
+            posting.doc_id == document_id
+            for posting in old_postings
+        )
+
+        second_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Updated</title>
+        </head>
+        <body>
+            <p>Distributed systems search engine.</p>
+        </body>
+        </html>
+        """
+
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = second_html
+            mock_get.return_value.raise_for_status.return_value = None
+
+            second_results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                indexer=indexer,
+            )
+
+        second_result = second_results[0]
+
+        assert second_result.change_type == DocumentChangeType.UPDATED
+        assert second_result.document.id == document_id
+
+        # Old term should no longer be indexed.
+        old_postings = indexer.get_index().get_postings(
+            "python"
+        )
+
+        assert not any(
+            posting.doc_id == document_id
+            for posting in old_postings
+        )
+
+        # New term should be indexed.
+        new_postings = indexer.get_index().get_postings(
+            "distribut"
+        )
+
+        assert any(
+            posting.doc_id == document_id
+            for posting in new_postings
+        )
+
+    finally:
+        document = get_document_by_url(
+            db=db,
+            url=test_url,
+        )
+
+        if document is not None:
+            db.delete(document)
+            db.commit()
+
+        db.close()
+
+
+def test_pipeline_skips_unchanged_document():
+    db = SessionLocal()
+
+    test_url = "https://example.com/incremental-unchanged"
+
+    try:
+        indexer = Indexer()
+
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = MOCK_HTML
+            mock_get.return_value.raise_for_status.return_value = None
+
+            first_results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                indexer=indexer,
+            )
+
+        first_result = first_results[0]
+
+        assert first_result.change_type == DocumentChangeType.CREATED
+
+        document_id = first_result.document.id
+
+        # Remove the document from the index manually.
+        indexer.remove_document(document_id)
+
+        assert indexer.get_index().get_postings("test") == []
+
+        # Crawl the exact same content again.
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = MOCK_HTML
+            mock_get.return_value.raise_for_status.return_value = None
+
+            second_results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                indexer=indexer,
+            )
+
+        second_result = second_results[0]
+
+        assert second_result.change_type == DocumentChangeType.UNCHANGED
+        assert second_result.changed is False
+
+        # Because the document was unchanged, the pipeline
+        # should NOT have indexed it again.
+        assert indexer.get_index().get_postings("test") == []
+
+    finally:
+        document = get_document_by_url(
+            db=db,
+            url=test_url,
+        )
+
+        if document is not None:
+            db.delete(document)
+            db.commit()
+
         db.close()

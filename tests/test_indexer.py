@@ -10,7 +10,7 @@ def test_index_single_document():
     document = None
 
     try:
-        document = save_document(
+        document, change_type = save_document(
             db=db,
             url=url,
             title="Indexer Test",
@@ -46,7 +46,7 @@ def test_index_multiple_documents():
     ]
 
     try:
-        document1 = save_document(
+        document1, change_type1 = save_document(
             db=db,
             url=urls[0],
             title="Python",
@@ -54,7 +54,7 @@ def test_index_multiple_documents():
             content_type="text/html",
         )
 
-        document2 = save_document(
+        document2, change_type2 = save_document(
             db=db,
             url=urls[1],
             title="Search",
