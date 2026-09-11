@@ -36,21 +36,22 @@ class InvertedIndex:
                 )
             }
         }
-
-    The index also maintains document-level statistics required
-    by the Search Engine and BM25 ranking.
     """
 
     def __init__(self) -> None:
         self._postings: dict[str, dict[int, Posting]] = {}
         self._document_lengths: dict[int, int] = {}
 
-    def add_document(self, doc_id: int, tokens: list[str]) -> None:
+    def add_document(
+        self,
+        doc_id: int,
+        tokens: list[str],
+    ) -> None:
         """
         Add a document to the index.
 
-        If the document already exists, its previous index data
-        is removed before adding the new version.
+        If the document already exists, its previous
+        index data is removed before adding the new version.
         """
 
         self.remove_document(doc_id)
@@ -61,7 +62,10 @@ class InvertedIndex:
             if not token:
                 continue
 
-            term_postings = self._postings.setdefault(token, {})
+            term_postings = self._postings.setdefault(
+                token,
+                {},
+            )
 
             posting = term_postings.get(doc_id)
 
@@ -71,9 +75,12 @@ class InvertedIndex:
 
             posting.add_occurrence(position)
 
-    def remove_document(self, doc_id: int) -> None:
+    def remove_document(
+        self,
+        doc_id: int,
+    ) -> None:
         """
-        Remove a document and all of its postings from the index.
+        Remove a document and all of its postings.
         """
 
         self._document_lengths.pop(doc_id, None)
@@ -89,7 +96,10 @@ class InvertedIndex:
         for term in empty_terms:
             del self._postings[term]
 
-    def get_postings(self, term: str) -> list[Posting]:
+    def get_postings(
+        self,
+        term: str,
+    ) -> list[Posting]:
         """
         Return all postings for a term.
 
@@ -103,28 +113,78 @@ class InvertedIndex:
             for doc_id in sorted(term_postings)
         ]
 
-    def document_length(self, doc_id: int) -> int:
+    def document_length(
+        self,
+        doc_id: int,
+    ) -> int:
         """
         Return the number of tokens indexed for a document.
         """
 
         return self._document_lengths.get(doc_id, 0)
 
-    def document_frequency(self, term: str) -> int:
+    def document_frequency(
+        self,
+        term: str,
+    ) -> int:
         """
         Return the number of documents containing the term.
-
-        This statistic is required by ranking algorithms such as BM25.
         """
 
-        return len(self._postings.get(term, {}))
+        return len(
+            self._postings.get(term, {})
+        )
 
-    def contains(self, term: str) -> bool:
+    def contains(
+        self,
+        term: str,
+    ) -> bool:
         """
         Return True if the term exists in the vocabulary.
         """
 
         return term in self._postings
+
+    def clear(self) -> None:
+        """
+        Remove all index data.
+        """
+
+        self._postings.clear()
+        self._document_lengths.clear()
+
+    # ---------------------------------------------------------
+    # Persistence helpers
+    # ---------------------------------------------------------
+
+    def set_document_length(
+        self,
+        doc_id: int,
+        length: int,
+    ) -> None:
+        """
+        Restore a document length from persistent storage.
+        """
+
+        self._document_lengths[doc_id] = length
+
+    def set_posting(
+        self,
+        term: str,
+        posting: Posting,
+    ) -> None:
+        """
+        Restore a posting from persistent storage.
+        """
+
+        self._postings.setdefault(
+            term,
+            {},
+        )[posting.doc_id] = posting
+
+    # ---------------------------------------------------------
+    # Index statistics
+    # ---------------------------------------------------------
 
     @property
     def document_count(self) -> int:
@@ -142,10 +202,29 @@ class InvertedIndex:
 
         return len(self._postings)
 
-    
     @property
     def document_ids(self) -> set[int]:
         """
         Return all document IDs currently stored in the index.
         """
+
         return set(self._document_lengths)
+
+    @property
+    def terms(self) -> set[str]:
+        """
+        Return all terms currently in the vocabulary.
+        """
+
+        return set(self._postings)
+
+    @property
+    def document_lengths(self) -> dict[int, int]:
+        """
+        Return document lengths.
+
+        A copy is returned so callers cannot accidentally
+        modify the internal state.
+        """
+
+        return dict(self._document_lengths)

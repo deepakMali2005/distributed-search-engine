@@ -1,38 +1,54 @@
 from sqlalchemy.orm import Session
 
 from services.indexer.indexer import Indexer
+from services.indexer.persistence import JsonIndexPersistence
 from services.search.engine import SearchEngine
 from services.search.models import SearchResult
 
 
 class SearchService:
     """
-    Application-level service that prepares the search index
-    and executes searches.
-
-    PostgreSQL
-        ↓
-    Indexer
-        ↓
-    InvertedIndex
-        ↓
-    SearchEngine
+    Coordinates the persistent index and search engine.
     """
 
-    def __init__(self) -> None:
-        self.indexer = Indexer()
+    def __init__(
+        self,
+        index_path: str = "data/index/index.json",
+    ) -> None:
+        self.indexer = Indexer(
+            persistence=JsonIndexPersistence(
+                index_path
+            )
+        )
+
         self.engine = SearchEngine(
             self.indexer.get_index()
         )
 
         self._initialized = False
 
-    def initialize(self, db: Session) -> None:
+    def initialize(
+        self,
+        db: Session,
+    ) -> None:
         """
-        Load all stored documents into the in-memory index.
+        Initialize the search index.
+
+        If a persistent index exists, load it.
+
+        Otherwise build the index from PostgreSQL
+        and persist it.
         """
 
-        self.indexer.index_all_documents(db)
+        loaded = self.indexer.load()
+
+        if not loaded:
+            self.indexer.index_all_documents(db)
+
+        self.engine = SearchEngine(
+            self.indexer.get_index()
+        )
+
         self._initialized = True
 
     def search(
@@ -40,10 +56,6 @@ class SearchService:
         query: str,
         limit: int = 10,
     ) -> list[SearchResult]:
-        """
-        Execute a search against the loaded index.
-        """
-
         if not self._initialized:
             raise RuntimeError(
                 "SearchService has not been initialized."

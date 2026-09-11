@@ -32,3 +32,4 @@ node_modules/
 # Local data
 data/
 venv_scripts.txt
+data/index/
