@@ -14,11 +14,15 @@ the complete ingestion pipeline:
 """
 
 from unittest.mock import patch
+from unittest.mock import Mock
 
 from services.pipeline.pipeline import crawl_and_store
 from services.search_api.database import SessionLocal
 from services.storage.storage import get_document_by_url
-from libs.common.document_events import DocumentChangeType
+from libs.common.document_events import (
+    DocumentChangeType,
+    DocumentEventType,
+)
 from services.indexer.indexer import Indexer
 
 
@@ -331,6 +335,228 @@ def test_pipeline_skips_unchanged_document():
         # Because the document was unchanged, the pipeline
         # should NOT have indexed it again.
         assert indexer.get_index().get_postings("test") == []
+
+    finally:
+        document = get_document_by_url(
+            db=db,
+            url=test_url,
+        )
+
+        if document is not None:
+            db.delete(document)
+            db.commit()
+
+        db.close()
+
+def test_pipeline_publishes_created_event():
+    db = SessionLocal()
+
+    test_url = "https://example.com/kafka-created"
+
+    try:
+        event_producer = Mock()
+
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = MOCK_HTML
+            mock_get.return_value.raise_for_status.return_value = None
+
+            results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                event_producer=event_producer,
+            )
+
+        assert len(results) == 1
+
+        result = results[0]
+
+        assert result.change_type == DocumentChangeType.CREATED
+        assert result.document.version == 1
+
+        event_producer.publish.assert_called_once()
+
+        event = event_producer.publish.call_args.args[0]
+
+        assert event.event_type == DocumentEventType.CREATED
+        assert event.document_id == result.document.id
+        assert event.event_version == 1
+        assert event.url == result.document.url
+        assert event.content_hash == result.document.content_hash
+
+    finally:
+        document = get_document_by_url(
+            db=db,
+            url=test_url,
+        )
+
+        if document is not None:
+            db.delete(document)
+            db.commit()
+
+        db.close()
+
+def test_pipeline_publishes_updated_event_with_new_version():
+    db = SessionLocal()
+
+    test_url = "https://example.com/kafka-updated"
+
+    try:
+        event_producer = Mock()
+
+        first_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Original</title>
+        </head>
+        <body>
+            <p>Python programming language.</p>
+        </body>
+        </html>
+        """
+
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = first_html
+            mock_get.return_value.raise_for_status.return_value = None
+
+            first_results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                event_producer=event_producer,
+            )
+
+        first_result = first_results[0]
+
+        assert first_result.change_type == DocumentChangeType.CREATED
+        assert first_result.document.version == 1
+
+        first_event = event_producer.publish.call_args.args[0]
+
+        assert first_event.event_type == DocumentEventType.CREATED
+        assert first_event.event_version == 1
+
+        event_producer.reset_mock()
+
+        second_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Updated</title>
+        </head>
+        <body>
+            <p>Distributed systems search engine.</p>
+        </body>
+        </html>
+        """
+
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = second_html
+            mock_get.return_value.raise_for_status.return_value = None
+
+            second_results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                event_producer=event_producer,
+            )
+
+        second_result = second_results[0]
+
+        assert second_result.change_type == DocumentChangeType.UPDATED
+        assert second_result.document.version == 2
+        assert second_result.document.id == first_result.document.id
+
+        event_producer.publish.assert_called_once()
+
+        second_event = event_producer.publish.call_args.args[0]
+
+        assert second_event.event_type == DocumentEventType.UPDATED
+        assert second_event.document_id == second_result.document.id
+        assert second_event.event_version == 2
+        assert second_event.url == second_result.document.url
+        assert second_event.content_hash == second_result.document.content_hash
+
+    finally:
+        document = get_document_by_url(
+            db=db,
+            url=test_url,
+        )
+
+        if document is not None:
+            db.delete(document)
+            db.commit()
+
+        db.close()
+
+def test_pipeline_does_not_publish_event_for_unchanged_document():
+    db = SessionLocal()
+
+    test_url = "https://example.com/kafka-unchanged"
+
+    try:
+        event_producer = Mock()
+
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = MOCK_HTML
+            mock_get.return_value.raise_for_status.return_value = None
+
+            first_results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                event_producer=event_producer,
+            )
+
+        first_result = first_results[0]
+
+        assert first_result.change_type == DocumentChangeType.CREATED
+        assert first_result.document.version == 1
+
+        assert event_producer.publish.call_count == 1
+
+        event_producer.reset_mock()
+
+        # Crawl the exact same content again.
+        with patch(
+            "services.crawler.crawler.requests.get"
+        ) as mock_get:
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.text = MOCK_HTML
+            mock_get.return_value.raise_for_status.return_value = None
+
+            second_results = crawl_and_store(
+                db=db,
+                start_url=test_url,
+                max_pages=1,
+                event_producer=event_producer,
+            )
+
+        second_result = second_results[0]
+
+        assert second_result.change_type == DocumentChangeType.UNCHANGED
+        assert second_result.document.version == 1
+
+        # No Kafka event should be produced for unchanged content.
+        event_producer.publish.assert_not_called()
 
     finally:
         document = get_document_by_url(

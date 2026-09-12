@@ -106,6 +106,7 @@ class DocumentChangeEvent:
         document_id: int,
         url: str,
         content_hash: str | None,
+        event_version: int = 1,
         occurred_at: datetime | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> "DocumentChangeEvent":
@@ -120,7 +121,7 @@ class DocumentChangeEvent:
 
         return cls(
             event_id=str(uuid4()),
-            event_version=cls.CURRENT_VERSION,
+            event_version=event_version,
             event_type=event_type,
             document_id=document_id,
             url=url,

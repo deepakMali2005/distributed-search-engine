@@ -31,12 +31,15 @@ def save_document(
 
     CREATED:
         Document did not previously exist.
+        The document starts at version 1.
 
     UPDATED:
         Document existed but its content changed.
+        The document version is incremented.
 
     UNCHANGED:
         Document existed and its content did not change.
+        The document version remains unchanged.
     """
 
     content_hash = calculate_content_hash(content)
@@ -54,6 +57,7 @@ def save_document(
             content=content,
             content_type=content_type,
             content_hash=content_hash,
+            version=1,
         )
 
         db.add(document)
@@ -71,6 +75,7 @@ def save_document(
     existing_document.content = content
     existing_document.content_type = content_type
     existing_document.content_hash = content_hash
+    existing_document.version += 1
 
     db.commit()
     db.refresh(existing_document)

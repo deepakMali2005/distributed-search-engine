@@ -131,3 +131,14 @@ def test_invalid_json_is_rejected():
         DocumentChangeEvent.from_json(
             "not valid json"
         )
+
+def test_create_event_uses_document_event_version():
+    event = DocumentChangeEvent.create(
+        event_type=DocumentEventType.UPDATED,
+        document_id=123,
+        url="https://example.com/versioned",
+        content_hash="hash123",
+        event_version=7,
+    )
+
+    assert event.event_version == 7
