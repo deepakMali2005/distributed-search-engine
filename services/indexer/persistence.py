@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from services.indexer.index import InvertedIndex
+from services.indexer.index import InvertedIndex, Posting
 
 
 class IndexPersistence:
@@ -81,9 +81,13 @@ class JsonIndexPersistence(IndexPersistence):
         self,
         index: InvertedIndex,
     ) -> dict[str, Any]:
+        """
+        Convert the in-memory index into JSON-compatible data.
+        """
+
         terms: dict[str, Any] = {}
 
-        for term, postings in index._index.items():
+        for term, postings in index._postings.items():
             terms[term] = {}
 
             for doc_id, posting in postings.items():
@@ -106,6 +110,10 @@ class JsonIndexPersistence(IndexPersistence):
         self,
         data: dict[str, Any],
     ) -> InvertedIndex:
+        """
+        Reconstruct an InvertedIndex from persisted JSON data.
+        """
+
         index = InvertedIndex()
 
         document_lengths = data.get(
@@ -126,13 +134,20 @@ class JsonIndexPersistence(IndexPersistence):
 
         for term, postings in terms.items():
             for doc_id, posting_data in postings.items():
-                index.set_posting(
-                    term=term,
+                posting = Posting(
                     doc_id=int(doc_id),
                     term_frequency=int(
                         posting_data["term_frequency"]
                     ),
-                    positions=posting_data["positions"],
+                    positions=[
+                        int(position)
+                        for position in posting_data["positions"]
+                    ],
+                )
+
+                index.set_posting(
+                    term=term,
+                    posting=posting,
                 )
 
         return index
