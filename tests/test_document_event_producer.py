@@ -101,3 +101,28 @@ def test_publish_serializes_event_using_event_contract():
     call = mock_kafka_producer.produce.call_args
 
     assert call.kwargs["value"] == event.to_json()
+
+
+def test_publish_to_dlq_sends_event_to_dlq_topic():
+    config = KafkaConfig(
+        bootstrap_servers="localhost:9092",
+        document_events_topic="document-events",
+        document_events_dlq_topic="document-events-dlq",
+    )
+
+    producer = DocumentEventProducer(config)
+
+    mock_kafka_producer = Mock(spec=Producer)
+    producer._producer = mock_kafka_producer
+
+    event = make_event()
+
+    producer.publish_to_dlq(event)
+
+    mock_kafka_producer.produce.assert_called_once_with(
+        topic="document-events-dlq",
+        key="42",
+        value=event.to_json(),
+    )
+
+    mock_kafka_producer.flush.assert_called_once()

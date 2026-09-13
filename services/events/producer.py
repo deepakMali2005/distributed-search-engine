@@ -28,15 +28,41 @@ class DocumentEventProducer:
         event: DocumentChangeEvent,
     ) -> None:
         """
-        Publish a document change event to Kafka.
+        Publish a document event to the main document-events topic.
+        """
 
-        The document_id is used as the Kafka message key so that
-        all events for the same document are routed to the same
-        partition, preserving their order.
+        self._publish_to_topic(
+            topic=self.config.document_events_topic,
+            event=event,
+        )
+
+    def publish_to_dlq(
+        self,
+        event: DocumentChangeEvent,
+    ) -> None:
+        """
+        Publish the original document event to the DLQ topic.
+
+        The event payload is intentionally unchanged so the DLQ
+        contains the original event that failed processing.
+        """
+
+        self._publish_to_topic(
+            topic=self.config.document_events_dlq_topic,
+            event=event,
+        )
+
+    def _publish_to_topic(
+        self,
+        topic: str,
+        event: DocumentChangeEvent,
+    ) -> None:
+        """
+        Publish an event to the specified Kafka topic.
         """
 
         self._producer.produce(
-            topic=self.config.document_events_topic,
+            topic=topic,
             key=str(event.document_id),
             value=event.to_json(),
         )

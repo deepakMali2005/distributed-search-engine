@@ -1,5 +1,12 @@
+from libs.models import (
+    Base,
+    Document,
+    DocumentIndexVersion,
+    ProcessedEvent,
+)
+
 from .database import engine
-from libs.models import Base, Document
+
 
 Base.metadata.create_all(bind=engine)
 
