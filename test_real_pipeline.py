@@ -10,11 +10,13 @@ Pipeline:
         ↓
     Crawler
         ↓
-    Pipeline
+    Processor
         ↓
     Storage
         ↓
     PostgreSQL
+        ↓
+    Kafka event publication (when configured)
 """
 
 
@@ -24,6 +26,7 @@ from services.search_api.database import SessionLocal
 
 # Starting Wikipedia article.
 START_URL = "https://en.wikipedia.org/wiki/Information_retrieval"
+
 # Keep this small while testing the crawler.
 MAX_PAGES = 5
 
@@ -44,22 +47,28 @@ def main():
 
         # Run the complete:
         #
-        # Crawler → Pipeline → Storage → PostgreSQL
-        documents = crawl_and_store(
+        # Wikipedia → Crawler → Processor → Storage → PostgreSQL
+        #
+        # crawl_and_store() returns PipelineResult objects.
+        results = crawl_and_store(
             db=db,
             start_url=START_URL,
             max_pages=MAX_PAGES,
         )
 
-        print(f"Documents processed: {len(documents)}")
+        print(f"Documents processed: {len(results)}")
         print()
 
         # Display the documents that were stored.
-        for document in documents:
+        for result in results:
+            document = result.document
+
             print("-" * 60)
             print(f"Database ID : {document.id}")
             print(f"Title       : {document.title}")
             print(f"URL         : {document.url}")
+            print(f"Change type : {result.change_type.value}")
+            print(f"Version     : {document.version}")
             print(f"Content     : {document.content[:200]}...")
 
         print("-" * 60)

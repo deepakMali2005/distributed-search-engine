@@ -829,3 +829,103 @@ def test_duplicate_event_is_skipped_before_version_check(
     analyzer.analyze.assert_not_called()
 
     consumer.commit.assert_called_once_with(message)
+
+def test_remote_shard_indexing_uses_consistent_hash_routing():
+    db = Mock(spec=Session)
+    consumer = Mock(spec=DocumentEventConsumer)
+    analyzer = Mock(spec=TextAnalyzer)
+
+    router = Mock()
+    remote_client = Mock()
+    remote_client.shard_id = "shard-1"
+
+    router.get_shard_id.return_value = "shard-1"
+
+    worker = IndexerWorker(
+        db=db,
+        shard_manager=None,
+        consumer=consumer,
+        analyzer=analyzer,
+        shard_router=router,
+        shard_clients={
+            "shard-1": remote_client,
+        },
+    )
+
+    document = make_document()
+
+    db.get.return_value = document
+
+    analyzer.analyze.return_value = [
+        "distribut",
+        "search",
+        "python",
+    ]
+
+    with patch(
+        "services.indexer.worker.is_event_processed",
+        return_value=False,
+    ), patch(
+        "services.indexer.worker.get_latest_indexed_version",
+        return_value=None,
+    ), patch(
+        "services.indexer.worker.record_indexed_version",
+    ), patch(
+        "services.indexer.worker.record_processed_event",
+    ):
+        worker.process_message(
+            make_message(
+                make_event()
+            )
+        )
+
+    router.get_shard_id.assert_called_once_with(
+        42
+    )
+
+    remote_client.index_document.assert_called_once_with(
+        document_id=42,
+        tokens=[
+            "distribut",
+            "search",
+            "python",
+        ],
+    )
+
+
+def test_remote_shard_delete_uses_consistent_hash_routing():
+    db = Mock(spec=Session)
+    consumer = Mock(spec=DocumentEventConsumer)
+    analyzer = Mock(spec=TextAnalyzer)
+
+    router = Mock()
+    remote_client = Mock()
+    remote_client.shard_id = "shard-1"
+
+    router.get_shard_id.return_value = "shard-1"
+
+    worker = IndexerWorker(
+        db=db,
+        shard_manager=None,
+        consumer=consumer,
+        analyzer=analyzer,
+        shard_router=router,
+        shard_clients={
+            "shard-1": remote_client,
+        },
+    )
+
+    worker.process_event(
+        make_event(
+            event_type=DocumentEventType.DELETED,
+            content_hash=None,
+        )
+    )
+
+    router.get_shard_id.assert_called_once_with(
+        42
+    )
+
+    remote_client.delete_document.assert_called_once_with(
+        document_id=42
+    )

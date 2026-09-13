@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Protocol
 
 from sqlalchemy.orm import Session
 
@@ -17,6 +18,8 @@ from services.events.consumer import DocumentEventConsumer
 from services.events.producer import DocumentEventProducer
 from services.indexer.analyzer import TextAnalyzer
 from services.indexer.shard_manager import ShardManager
+from services.indexer.shard_router import ShardRouter
+from services.search_api.database import SessionLocal
 from services.storage.document_index_versions import (
     get_latest_indexed_version,
     record_indexed_version,
@@ -28,9 +31,39 @@ from services.storage.processed_events import (
 from services.storage.storage import get_document
 
 
+class ShardIndexClient(Protocol):
+    shard_id: str
+
+    def index_document(
+        self,
+        document_id: int,
+        tokens: list[str],
+    ) -> None:
+        ...
+
+    def delete_document(
+        self,
+        document_id: int,
+    ) -> None:
+        ...
+
+
 class IndexerWorker:
     """
     Processes document change events from Kafka.
+
+    The worker supports two indexing modes:
+
+    1. Local mode:
+        Kafka → local ShardManager
+
+       Used by unit/integration tests and local in-process
+       indexing scenarios.
+
+    2. Distributed mode:
+        Kafka → ShardRouter → remote shard clients
+
+       Used by the real distributed worker service.
 
     Kafka provides at-least-once delivery, so events may be delivered
     more than once or out of order.
@@ -43,12 +76,15 @@ class IndexerWorker:
     def __init__(
         self,
         db: Session,
-        shard_manager: ShardManager,
+        shard_manager: ShardManager | None,
         consumer: DocumentEventConsumer,
         analyzer: TextAnalyzer | None = None,
         max_retries: int = 3,
         retry_delay: float = 1.0,
         dlq_producer: DocumentEventProducer | None = None,
+        *,
+        shard_router: ShardRouter | None = None,
+        shard_clients: dict[str, ShardIndexClient] | None = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError(
@@ -60,6 +96,21 @@ class IndexerWorker:
                 "retry_delay must be greater than or equal to 0"
             )
 
+        if shard_manager is not None and shard_clients is not None:
+            raise ValueError(
+                "Provide either shard_manager or shard_clients, not both."
+            )
+
+        if shard_clients is not None and not shard_clients:
+            raise ValueError(
+                "shard_clients cannot be empty."
+            )
+
+        if shard_clients is not None and shard_router is None:
+            raise ValueError(
+                "shard_router is required when shard_clients are provided."
+            )
+
         self.db = db
         self.shard_manager = shard_manager
         self.consumer = consumer
@@ -67,6 +118,89 @@ class IndexerWorker:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.dlq_producer = dlq_producer
+        self.shard_router = shard_router
+        self.shard_clients = shard_clients
+
+    def _index_document(
+        self,
+        document_id: int,
+        tokens: list[str],
+    ) -> None:
+        """
+        Index a document using either the local or distributed
+        shard implementation.
+        """
+
+        if self.shard_clients is not None:
+            assert self.shard_router is not None
+
+            shard_id = self.shard_router.get_shard_id(
+                document_id
+            )
+
+            client = self.shard_clients.get(
+                shard_id
+            )
+
+            if client is None:
+                raise RuntimeError(
+                    f"No shard client configured for {shard_id}"
+                )
+
+            client.index_document(
+                document_id=document_id,
+                tokens=tokens,
+            )
+            return
+
+        if self.shard_manager is None:
+            raise RuntimeError(
+                "No shard indexing backend is configured."
+            )
+
+        self.shard_manager.index_document(
+            document_id=document_id,
+            tokens=tokens,
+        )
+
+    def _delete_document(
+        self,
+        document_id: int,
+    ) -> None:
+        """
+        Delete a document using either the local or distributed
+        shard implementation.
+        """
+
+        if self.shard_clients is not None:
+            assert self.shard_router is not None
+
+            shard_id = self.shard_router.get_shard_id(
+                document_id
+            )
+
+            client = self.shard_clients.get(
+                shard_id
+            )
+
+            if client is None:
+                raise RuntimeError(
+                    f"No shard client configured for {shard_id}"
+                )
+
+            client.delete_document(
+                document_id=document_id
+            )
+            return
+
+        if self.shard_manager is None:
+            raise RuntimeError(
+                "No shard indexing backend is configured."
+            )
+
+        self.shard_manager.remove_document(
+            document_id
+        )
 
     def process_event(
         self,
@@ -82,7 +216,9 @@ class IndexerWorker:
         """
 
         if event.event_type == DocumentEventType.DELETED:
-            self.shard_manager.remove_document(event.document_id)
+            self._delete_document(
+                event.document_id
+            )
             return True
 
         document = get_document(
@@ -112,9 +248,11 @@ class IndexerWorker:
                 f"{event.document_id}"
             )
 
-        tokens = self.analyzer.analyze(document.content)
+        tokens = self.analyzer.analyze(
+            document.content
+        )
 
-        self.shard_manager.index_document(
+        self._index_document(
             document_id=event.document_id,
             tokens=tokens,
         )
@@ -140,7 +278,9 @@ class IndexerWorker:
                 "Kafka document event payload must be bytes or string"
             )
 
-        return DocumentChangeEvent.from_json(payload)
+        return DocumentChangeEvent.from_json(
+            payload
+        )
 
     def process_message(
         self,
@@ -153,27 +293,35 @@ class IndexerWorker:
                 f"Kafka consumer error: {error}"
             )
 
-        event = self._deserialize_event(message)
+        event = self._deserialize_event(
+            message
+        )
 
         # Exact event duplicate.
         if is_event_processed(
             db=self.db,
             event_id=event.event_id,
         ):
-            self.consumer.commit(message)
+            self.consumer.commit(
+                message
+            )
             return
 
         # DELETED events are handled directly because there is no
         # canonical document to read after deletion.
         if event.event_type == DocumentEventType.DELETED:
-            self.process_event(event)
+            self.process_event(
+                event
+            )
 
             record_processed_event(
                 db=self.db,
                 event=event,
             )
 
-            self.consumer.commit(message)
+            self.consumer.commit(
+                message
+            )
             return
 
         document = get_document(
@@ -186,9 +334,11 @@ class IndexerWorker:
                 f"Document {event.document_id} does not exist in PostgreSQL"
             )
 
-        latest_indexed_version = get_latest_indexed_version(
-            db=self.db,
-            document_id=event.document_id,
+        latest_indexed_version = (
+            get_latest_indexed_version(
+                db=self.db,
+                document_id=event.document_id,
+            )
         )
 
         version_state = classify_event_version(
@@ -203,7 +353,9 @@ class IndexerWorker:
                 event=event,
             )
 
-            self.consumer.commit(message)
+            self.consumer.commit(
+                message
+            )
             return
 
         if version_state == EventVersionState.FUTURE:
@@ -220,9 +372,11 @@ class IndexerWorker:
                 f"{event.document_id}"
             )
 
-        tokens = self.analyzer.analyze(document.content)
+        tokens = self.analyzer.analyze(
+            document.content
+        )
 
-        self.shard_manager.index_document(
+        self._index_document(
             document_id=event.document_id,
             tokens=tokens,
         )
@@ -237,7 +391,9 @@ class IndexerWorker:
             event=event,
         )
 
-        self.consumer.commit(message)
+        self.consumer.commit(
+            message
+        )
 
     def _publish_to_dlq(
         self,
@@ -250,7 +406,9 @@ class IndexerWorker:
                 KafkaConfig.from_environment()
             )
 
-        producer.publish_to_dlq(event)
+        producer.publish_to_dlq(
+            event
+        )
 
     def process_message_with_retry(
         self,
@@ -261,7 +419,9 @@ class IndexerWorker:
 
         for attempt in range(attempts):
             try:
-                self.process_message(message)
+                self.process_message(
+                    message
+                )
                 return
 
             except Exception as exc:
@@ -271,26 +431,38 @@ class IndexerWorker:
                     break
 
                 if self.retry_delay > 0:
-                    time.sleep(self.retry_delay)
+                    time.sleep(
+                        self.retry_delay
+                    )
 
         assert last_error is not None
 
-        event = self._deserialize_event(message)
+        event = self._deserialize_event(
+            message
+        )
 
-        self._publish_to_dlq(event)
+        self._publish_to_dlq(
+            event
+        )
 
-        self.consumer.commit(message)
+        self.consumer.commit(
+            message
+        )
 
     def run_once(
         self,
         timeout: float = 1.0,
     ) -> bool:
-        message = self.consumer.poll(timeout)
+        message = self.consumer.poll(
+            timeout
+        )
 
         if message is None:
             return False
 
-        self.process_message_with_retry(message)
+        self.process_message_with_retry(
+            message
+        )
 
         return True
 
