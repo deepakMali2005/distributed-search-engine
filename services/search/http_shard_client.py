@@ -8,6 +8,24 @@ from urllib.request import Request, urlopen
 from services.search.models import SearchResult
 
 
+class ShardSearchError(RuntimeError):
+    """
+    Error raised when a remote shard search fails.
+
+    retryable indicates whether retrying the same request may
+    reasonably succeed.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class HttpShardSearchClient:
     """
     HTTP client for a remote shard service.
@@ -45,6 +63,45 @@ class HttpShardSearchClient:
         self.shard_id = shard_id
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+
+    def health(self) -> bool:
+        """
+        Check whether the remote shard service is healthy.
+        """
+        request = Request(
+            f"{self.base_url}/health",
+            method="GET",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        try:
+            with urlopen(
+                request,
+                timeout=self.timeout_seconds,
+            ) as response:
+                if response.status != 200:
+                    return False
+
+                payload = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            return False
+
+        return (
+            payload.get("status") == "ok"
+            and payload.get("shard_id") == self.shard_id
+        )
 
     def search(
         self,
@@ -87,9 +144,12 @@ class HttpShardSearchClient:
                 timeout=self.timeout_seconds,
             ) as response:
                 if response.status != 200:
-                    raise RuntimeError(
-                        f"Shard {self.shard_id} returned "
-                        f"HTTP {response.status}."
+                    raise ShardSearchError(
+                        (
+                            f"Shard {self.shard_id} "
+                            f"returned HTTP {response.status}."
+                        ),
+                        retryable=response.status >= 500,
                     )
 
                 payload = json.loads(
@@ -97,19 +157,24 @@ class HttpShardSearchClient:
                 )
 
         except HTTPError as exc:
-            raise RuntimeError(
-                f"Shard {self.shard_id} returned "
-                f"HTTP {exc.code}."
+            raise ShardSearchError(
+                (
+                    f"Shard {self.shard_id} "
+                    f"returned HTTP {exc.code}."
+                ),
+                retryable=exc.code >= 500,
             ) from exc
 
         except URLError as exc:
-            raise RuntimeError(
-                f"Shard {self.shard_id} is unavailable."
+            raise ShardSearchError(
+                f"Shard {self.shard_id} is unavailable.",
+                retryable=True,
             ) from exc
 
         except TimeoutError as exc:
-            raise RuntimeError(
-                f"Shard {self.shard_id} timed out."
+            raise ShardSearchError(
+                f"Shard {self.shard_id} timed out.",
+                retryable=True,
             ) from exc
 
         results = payload.get(

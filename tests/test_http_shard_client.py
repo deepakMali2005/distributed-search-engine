@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 import pytest
 
 from services.search.http_shard_client import (
     HttpShardSearchClient,
+    ShardSearchError,
 )
 
 
@@ -124,3 +126,104 @@ def test_http_client_rejects_invalid_timeout():
             base_url="http://127.0.0.1:8001",
             timeout_seconds=0,
         )
+
+
+def test_http_client_retries_are_classified_as_retryable():
+    error = ShardSearchError(
+        "temporary failure",
+        retryable=True,
+    )
+
+    assert error.retryable is True
+
+
+def test_http_client_permanent_errors_are_not_retryable():
+    error = ShardSearchError(
+        "permanent failure",
+        retryable=False,
+    )
+
+    assert error.retryable is False
+
+
+def test_http_client_http_500_is_retryable():
+    client = HttpShardSearchClient(
+        shard_id="shard-1",
+        base_url="http://127.0.0.1:8001",
+    )
+
+    error = HTTPError(
+        url="http://127.0.0.1:8001/search",
+        code=500,
+        msg="Internal Server Error",
+        hdrs=None,
+        fp=None,
+    )
+
+    with patch(
+        "services.search.http_shard_client.urlopen",
+        side_effect=error,
+    ):
+        with pytest.raises(
+            ShardSearchError,
+        ) as exc_info:
+            client.search(
+                query="python",
+                limit=10,
+            )
+
+    assert exc_info.value.retryable is True
+
+
+def test_http_client_http_404_is_not_retryable():
+    client = HttpShardSearchClient(
+        shard_id="shard-1",
+        base_url="http://127.0.0.1:8001",
+    )
+
+    error = HTTPError(
+        url="http://127.0.0.1:8001/search",
+        code=404,
+        msg="Not Found",
+        hdrs=None,
+        fp=None,
+    )
+
+    with patch(
+        "services.search.http_shard_client.urlopen",
+        side_effect=error,
+    ):
+        with pytest.raises(
+            ShardSearchError,
+        ) as exc_info:
+            client.search(
+                query="python",
+                limit=10,
+            )
+
+    assert exc_info.value.retryable is False
+
+
+def test_http_client_network_error_is_retryable():
+    client = HttpShardSearchClient(
+        shard_id="shard-1",
+        base_url="http://127.0.0.1:8001",
+    )
+
+    error = URLError(
+        "connection refused"
+    )
+
+    with patch(
+        "services.search.http_shard_client.urlopen",
+        side_effect=error,
+    ):
+        with pytest.raises(
+            ShardSearchError,
+        ) as exc_info:
+            client.search(
+                query="python",
+                limit=10,
+            )
+
+    assert exc_info.value.retryable is True

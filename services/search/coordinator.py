@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
@@ -80,8 +81,8 @@ class SearchCoordinator:
     1. A local ShardManager.
     2. A collection of remote ShardSearchClient instances.
 
-    This keeps the search coordination layer independent
-    from the transport mechanism.
+    Retry behavior is bounded and only applied to errors that
+    explicitly declare themselves retryable.
     """
 
     def __init__(
@@ -91,6 +92,8 @@ class SearchCoordinator:
         shard_clients: list[ShardSearchClient] | None = None,
         shard_timeout_seconds: float = 2.0,
         allow_partial_results: bool = True,
+        max_retries: int = 0,
+        retry_backoff_seconds: float = 0.05,
     ) -> None:
         if shard_timeout_seconds <= 0:
             raise ValueError(
@@ -115,6 +118,16 @@ class SearchCoordinator:
                 "or shard_clients, not both."
             )
 
+        if max_retries < 0:
+            raise ValueError(
+                "max_retries cannot be negative."
+            )
+
+        if retry_backoff_seconds < 0:
+            raise ValueError(
+                "retry_backoff_seconds cannot be negative."
+            )
+
         self.shard_manager = shard_manager
         self.shard_clients = shard_clients
 
@@ -124,6 +137,11 @@ class SearchCoordinator:
 
         self.allow_partial_results = (
             allow_partial_results
+        )
+
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = (
+            retry_backoff_seconds
         )
 
     @property
@@ -236,6 +254,48 @@ class SearchCoordinator:
             timed_out_shards=timed_out_shards,
         )
 
+    def _search_shard_with_retry(
+        self,
+        shard: ShardSearchClient,
+        query: str,
+        limit: int,
+    ) -> list[SearchResult]:
+        """
+        Search one shard with bounded retries.
+
+        Only exceptions with retryable=True are retried.
+        All other exceptions fail immediately.
+        """
+        attempt = 0
+
+        while True:
+            try:
+                return shard.search(
+                    query,
+                    limit,
+                )
+
+            except Exception as exc:
+                retryable = getattr(
+                    exc,
+                    "retryable",
+                    False,
+                )
+
+                if (
+                    not retryable
+                    or attempt >= self.max_retries
+                ):
+                    raise
+
+                attempt += 1
+
+                if self.retry_backoff_seconds > 0:
+                    time.sleep(
+                        self.retry_backoff_seconds
+                        * attempt
+                    )
+
     def _search_shards(
         self,
         shards: list[ShardSearchClient],
@@ -258,7 +318,8 @@ class SearchCoordinator:
         try:
             for shard in shards:
                 future = executor.submit(
-                    shard.search,
+                    self._search_shard_with_retry,
+                    shard,
                     query,
                     limit,
                 )
