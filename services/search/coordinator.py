@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
@@ -15,10 +17,8 @@ class ShardSearchClient(Protocol):
     """
     Interface used by the coordinator to search a shard.
 
-    A local Shard satisfies this interface today.
-
-    A future HTTP/gRPC shard client can implement the same
-    interface without changing the coordinator architecture.
+    Both local Shards and remote HTTP clients implement
+    this interface.
     """
 
     shard_id: str
@@ -75,24 +75,20 @@ class SearchCoordinator:
     """
     Coordinates searches across multiple shards.
 
-    Responsibilities:
+    The coordinator can operate against either:
 
-    1. Dispatch the query to shards.
-    2. Execute shard searches concurrently.
-    3. Collect successful results.
-    4. Handle shard failures and timeouts.
-    5. Deduplicate documents.
-    6. Globally rank results.
-    7. Return the global Top-K.
+    1. A local ShardManager.
+    2. A collection of remote ShardSearchClient instances.
 
-    The coordinator depends only on the shard-search interface,
-    allowing local shards today and remote shard services later.
+    This keeps the search coordination layer independent
+    from the transport mechanism.
     """
 
     def __init__(
         self,
-        shard_manager: ShardManager,
+        shard_manager: ShardManager | None = None,
         *,
+        shard_clients: list[ShardSearchClient] | None = None,
         shard_timeout_seconds: float = 2.0,
         allow_partial_results: bool = True,
     ) -> None:
@@ -101,13 +97,61 @@ class SearchCoordinator:
                 "shard_timeout_seconds must be greater than zero."
             )
 
+        if (
+            shard_manager is None
+            and not shard_clients
+        ):
+            raise ValueError(
+                "Provide either shard_manager "
+                "or shard_clients."
+            )
+
+        if (
+            shard_manager is not None
+            and shard_clients is not None
+        ):
+            raise ValueError(
+                "Provide either shard_manager "
+                "or shard_clients, not both."
+            )
+
         self.shard_manager = shard_manager
+        self.shard_clients = shard_clients
+
         self.shard_timeout_seconds = (
             shard_timeout_seconds
         )
+
         self.allow_partial_results = (
             allow_partial_results
         )
+
+    @property
+    def shard_count(self) -> int:
+        """
+        Return the number of shards participating in search.
+        """
+        if self.shard_clients is not None:
+            return len(self.shard_clients)
+
+        if self.shard_manager is not None:
+            return self.shard_manager.shard_count
+
+        return 0
+
+    def _get_shards(
+        self,
+    ) -> list[ShardSearchClient]:
+        """
+        Return the configured shard search clients.
+        """
+        if self.shard_clients is not None:
+            return list(self.shard_clients)
+
+        if self.shard_manager is not None:
+            return self.shard_manager.get_all_shards()
+
+        return []
 
     def search(
         self,
@@ -116,16 +160,11 @@ class SearchCoordinator:
     ) -> SearchResponse:
         """
         Execute a distributed search across all shards.
-
-        Each shard receives the requested limit. The coordinator
-        then merges all shard results and calculates the global
-        Top-K.
         """
-
         if not query.strip():
             return SearchResponse(
                 results=[],
-                total_shards=self.shard_manager.shard_count,
+                total_shards=self.shard_count,
                 successful_shards=0,
                 failed_shards=0,
                 timed_out_shards=0,
@@ -136,7 +175,7 @@ class SearchCoordinator:
                 "limit must be greater than zero."
             )
 
-        shards = self.shard_manager.get_all_shards()
+        shards = self._get_shards()
 
         if not shards:
             return SearchResponse(
@@ -205,12 +244,7 @@ class SearchCoordinator:
     ) -> list[ShardSearchOutcome]:
         """
         Search all shards concurrently.
-
-        The coordinator waits only up to the configured timeout.
-        Completed shard searches are collected while incomplete
-        searches are treated as timed out.
         """
-
         executor = ThreadPoolExecutor(
             max_workers=len(shards),
             thread_name_prefix="search-shard",
@@ -289,10 +323,9 @@ class SearchCoordinator:
         """
         Merge shard results into one globally ranked result list.
 
-        If the same document appears on multiple shards, the highest
-        score is retained.
+        If the same document appears on multiple shards, the
+        highest score is retained.
         """
-
         best_scores: dict[int, float] = {}
 
         for outcome in outcomes:
