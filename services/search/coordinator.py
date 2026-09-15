@@ -11,6 +11,7 @@ from typing import Protocol
 
 from services.indexer.shard import Shard
 from services.indexer.shard_manager import ShardManager
+from services.search.hybrid import HybridRanker
 from services.search.models import SearchResult
 from services.semantic.embedding import EmbeddingModel
 from services.semantic.models import (
@@ -107,6 +108,7 @@ class SearchCoordinator:
         max_retries: int = 0,
         retry_backoff_seconds: float = 0.05,
         embedding_model: EmbeddingModel | None = None,
+        hybrid_ranker: HybridRanker | None = None,
     ) -> None:
         if shard_timeout_seconds <= 0:
             raise ValueError(
@@ -158,6 +160,7 @@ class SearchCoordinator:
         )
 
         self.embedding_model = embedding_model
+        self.hybrid_ranker = hybrid_ranker or HybridRanker()
 
     @property
     def shard_count(self) -> int:
@@ -358,6 +361,143 @@ class SearchCoordinator:
 
         return SearchResponse(
             results=merged_results,
+            total_shards=len(shards),
+            successful_shards=successful_shards,
+            failed_shards=failed_shards,
+            timed_out_shards=timed_out_shards,
+        )
+
+    def hybrid_search(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> SearchResponse:
+        """
+        Execute distributed hybrid lexical + semantic search.
+
+        The coordinator embeds the query exactly once, fans lexical and
+        semantic retrieval out to all shards concurrently, then performs the
+        final score normalization and weighted fusion centrally.
+
+        In partial mode, results from any successful retrieval source remain
+        usable even when the other source fails on the same shard. Strict mode
+        rejects the response if either retrieval source fails or times out on
+        any shard.
+        """
+        if not query.strip():
+            return SearchResponse(
+                results=[],
+                total_shards=self.shard_count,
+                successful_shards=0,
+                failed_shards=0,
+                timed_out_shards=0,
+            )
+
+        if limit <= 0:
+            raise ValueError(
+                "limit must be greater than zero."
+            )
+
+        if self.embedding_model is None:
+            raise RuntimeError(
+                "An embedding_model is required for hybrid search."
+            )
+
+        shards = self._get_shards()
+
+        if not shards:
+            return SearchResponse(
+                results=[],
+                total_shards=0,
+                successful_shards=0,
+                failed_shards=0,
+                timed_out_shards=0,
+            )
+
+        # Embed once and reuse the same immutable vector for every shard.
+        query_embedding = self.embedding_model.embed(query)
+
+        lexical_outcomes = self._search_shards(
+            shards=shards,
+            query=query,
+            limit=limit,
+        )
+
+        semantic_outcomes = self._semantic_search_shards(
+            shards=shards,
+            query_embedding=query_embedding,
+            limit=limit,
+        )
+
+        lexical_by_shard = {
+            outcome.shard_id: outcome
+            for outcome in lexical_outcomes
+        }
+
+        semantic_by_shard = {
+            outcome.shard_id: outcome
+            for outcome in semantic_outcomes
+        }
+
+        failed_shards = 0
+        timed_out_shards = 0
+        successful_shards = 0
+
+        for shard in shards:
+            lexical = lexical_by_shard[shard.shard_id]
+            semantic = semantic_by_shard[shard.shard_id]
+
+            has_timeout = (
+                lexical.timed_out
+                or semantic.timed_out
+            )
+
+            has_failure = (
+                (
+                    lexical.error is not None
+                    and not lexical.timed_out
+                )
+                or (
+                    semantic.error is not None
+                    and not semantic.timed_out
+                )
+            )
+
+            if has_timeout:
+                timed_out_shards += 1
+            elif has_failure:
+                failed_shards += 1
+            else:
+                successful_shards += 1
+
+        if (
+            not self.allow_partial_results
+            and (
+                failed_shards > 0
+                or timed_out_shards > 0
+            )
+        ):
+            raise RuntimeError(
+                "Search failed because one or more shards "
+                "were unavailable."
+            )
+
+        lexical_scores = self._scores_from_outcomes(
+            lexical_outcomes
+        )
+
+        semantic_scores = self._scores_from_outcomes(
+            semantic_outcomes
+        )
+
+        results = self.hybrid_ranker.rank(
+            lexical_scores=lexical_scores,
+            semantic_scores=semantic_scores,
+            limit=limit,
+        )
+
+        return SearchResponse(
+            results=results,
             total_shards=len(shards),
             successful_shards=successful_shards,
             failed_shards=failed_shards,
@@ -612,6 +752,34 @@ class SearchCoordinator:
                 wait=False,
                 cancel_futures=True,
             )
+
+    @staticmethod
+    def _scores_from_outcomes(
+        outcomes: list[ShardSearchOutcome],
+    ) -> dict[int, float]:
+        """
+        Collect scores from every successful shard outcome.
+
+        Hybrid ranking needs both retrieval sources in one global score map.
+        Failed or timed-out shard results are intentionally excluded so
+        partial-search mode can still use data from healthy shards.
+        """
+        scores: dict[int, float] = {}
+
+        for outcome in outcomes:
+            if not outcome.successful:
+                continue
+
+            for result in outcome.results:
+                existing_score = scores.get(result.doc_id)
+
+                if (
+                    existing_score is None
+                    or result.score > existing_score
+                ):
+                    scores[result.doc_id] = result.score
+
+        return scores
 
     @staticmethod
     def _merge_results(
