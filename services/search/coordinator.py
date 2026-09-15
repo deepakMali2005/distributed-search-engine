@@ -11,6 +11,7 @@ from typing import Protocol
 
 from services.indexer.shard import Shard
 from services.indexer.shard_manager import ShardManager
+from services.search.candidates import DistributedCandidatePolicy
 from services.search.hybrid import HybridRanker
 from services.search.models import SearchResult
 from services.semantic.embedding import EmbeddingModel
@@ -109,6 +110,7 @@ class SearchCoordinator:
         retry_backoff_seconds: float = 0.05,
         embedding_model: EmbeddingModel | None = None,
         hybrid_ranker: HybridRanker | None = None,
+        candidate_policy: DistributedCandidatePolicy | None = None,
     ) -> None:
         if shard_timeout_seconds <= 0:
             raise ValueError(
@@ -161,6 +163,9 @@ class SearchCoordinator:
 
         self.embedding_model = embedding_model
         self.hybrid_ranker = hybrid_ranker or HybridRanker()
+        self.candidate_policy = (
+            candidate_policy or DistributedCandidatePolicy()
+        )
 
     @property
     def shard_count(self) -> int:
@@ -414,19 +419,23 @@ class SearchCoordinator:
                 timed_out_shards=0,
             )
 
+        # Expand the per-shard retrieval window before global hybrid ranking.
+        # The final requested limit remains the limit passed to HybridRanker.
+        candidate_limit = self.candidate_policy.candidate_limit(limit)
+
         # Embed once and reuse the same immutable vector for every shard.
         query_embedding = self.embedding_model.embed(query)
 
         lexical_outcomes = self._search_shards(
             shards=shards,
             query=query,
-            limit=limit,
+            limit=candidate_limit,
         )
 
         semantic_outcomes = self._semantic_search_shards(
             shards=shards,
             query_embedding=query_embedding,
-            limit=limit,
+            limit=candidate_limit,
         )
 
         lexical_by_shard = {

@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from services.search.candidates import DistributedCandidatePolicy
 from services.search.coordinator import SearchCoordinator
 from services.search.http_shard_client import ShardSearchError
 from services.search.models import SearchResult
@@ -542,3 +543,144 @@ def test_hybrid_search_retries_transient_lexical_failure():
     assert response.timed_out_shards == 0
     assert response.results[0].doc_id == 1
     assert shard.attempts == 2
+
+
+def test_hybrid_search_expands_per_shard_candidate_window():
+    class RecordingShard(FakeHybridShard):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.lexical_limits: list[int] = []
+            self.semantic_limits: list[int] = []
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+        ) -> list[SearchResult]:
+            self.lexical_limits.append(limit)
+            return super().search(query, limit)
+
+        def semantic_search(
+            self,
+            query_embedding: Embedding,
+            limit: int,
+        ) -> list[SearchResult]:
+            self.semantic_limits.append(limit)
+            return super().semantic_search(query_embedding, limit)
+
+    shards = [
+        RecordingShard(
+            "shard-1",
+            lexical_results=[],
+            semantic_results=[],
+        ),
+        RecordingShard(
+            "shard-2",
+            lexical_results=[],
+            semantic_results=[],
+        ),
+    ]
+
+    policy = DistributedCandidatePolicy(
+        oversampling_factor=5,
+        minimum_candidates=10,
+    )
+
+    coordinator = SearchCoordinator(
+        shard_clients=shards,
+        embedding_model=FakeEmbeddingModel(),
+        candidate_policy=policy,
+    )
+
+    response = coordinator.hybrid_search(
+        "python",
+        limit=2,
+    )
+
+    assert response.results == []
+
+    for shard in shards:
+        assert shard.lexical_limits == [10]
+        assert shard.semantic_limits == [10]
+
+
+def test_hybrid_search_candidate_window_can_include_results_outside_final_k():
+    shard = FakeHybridShard(
+        "shard-1",
+        lexical_results=[
+            SearchResult(doc_id=1, score=10.0),
+            SearchResult(doc_id=2, score=9.0),
+            SearchResult(doc_id=3, score=2.0),
+        ],
+        semantic_results=[
+            SearchResult(doc_id=3, score=0.99),
+            SearchResult(doc_id=1, score=0.10),
+            SearchResult(doc_id=2, score=0.05),
+        ],
+    )
+
+    policy = DistributedCandidatePolicy(
+        oversampling_factor=1,
+        minimum_candidates=3,
+    )
+
+    coordinator = SearchCoordinator(
+        shard_clients=[shard],
+        embedding_model=FakeEmbeddingModel(),
+        candidate_policy=policy,
+    )
+
+    response = coordinator.hybrid_search(
+        "python",
+        limit=2,
+    )
+
+    assert len(response.results) == 2
+
+    assert [
+        result.doc_id
+        for result in response.results
+    ] == [1, 3]
+
+
+def test_hybrid_search_default_candidate_policy_is_used():
+    class RecordingShard(FakeHybridShard):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.lexical_limit: int | None = None
+            self.semantic_limit: int | None = None
+
+        def search(
+            self,
+            query: str,
+            limit: int,
+        ) -> list[SearchResult]:
+            self.lexical_limit = limit
+            return []
+
+        def semantic_search(
+            self,
+            query_embedding: Embedding,
+            limit: int,
+        ) -> list[SearchResult]:
+            self.semantic_limit = limit
+            return []
+
+    shard = RecordingShard(
+        "shard-1",
+        lexical_results=[],
+        semantic_results=[],
+    )
+
+    coordinator = SearchCoordinator(
+        shard_clients=[shard],
+        embedding_model=FakeEmbeddingModel(),
+    )
+
+    coordinator.hybrid_search(
+        "python",
+        limit=10,
+    )
+
+    assert shard.lexical_limit == 50
+    assert shard.semantic_limit == 50
