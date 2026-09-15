@@ -10,6 +10,7 @@ from services.semantic.models import Embedding
 from services.shard.config import ShardServiceConfig
 from services.shard.models import (
     DeleteDocumentResponse,
+    DocumentPresenceResponse,
     HealthResponse,
     IndexDocumentRequest,
     IndexDocumentResponse,
@@ -220,6 +221,28 @@ def create_app(
                 )
                 for result in results
             ],
+        )
+
+    @app.get(
+    "/documents/{document_id}",
+    response_model=DocumentPresenceResponse,
+)
+    def document_presence(
+        document_id: int,
+    ) -> DocumentPresenceResponse:
+        if not active_shard.contains_document(
+            document_id
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Document {document_id} not found"
+                ),
+            )
+
+        return DocumentPresenceResponse(
+            document_id=document_id,
+            shard_id=active_shard.shard_id,
         )
 
     return app

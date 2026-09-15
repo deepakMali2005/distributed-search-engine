@@ -6,15 +6,26 @@ services:
     restart: unless-stopped
 
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-search_engine}
+      POSTGRES_USER: ${POSTGRES_USER:-search_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-search_password}
 
     ports:
       - "5433:5432"
 
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-search_user} -d ${POSTGRES_DB:-search_engine}"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
 
   kafka:
@@ -23,28 +34,27 @@ services:
     restart: unless-stopped
 
     environment:
-      # KRaft
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
 
-      # Listeners
       KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
 
-      # Controller
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
 
-      # Broker
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
 
-      # Single-node development configuration
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
 
-      # Topic creation
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
 
     ports:
@@ -53,7 +63,389 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
 
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null 2>&1"
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+
+
+  kafka-init:
+    image: apache/kafka:4.0.0
+    container_name: search-engine-kafka-init
+    restart: "no"
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+    environment:
+      KAFKA_DOCUMENT_EVENTS_TOPIC: ${KAFKA_DOCUMENT_EVENTS_TOPIC:-document-events}
+
+      KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC: ${KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC:-document-events-dlq}
+
+    entrypoint:
+      [
+        "/bin/bash",
+        "-c"
+      ]
+
+    command:
+      - |
+        set -e
+
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --create \
+          --if-not-exists \
+          --topic "$$KAFKA_DOCUMENT_EVENTS_TOPIC" \
+          --partitions 3 \
+          --replication-factor 1
+
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:29092 \
+          --create \
+          --if-not-exists \
+          --topic "$$KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC" \
+          --partitions 3 \
+          --replication-factor 1
+
+        echo "Kafka topics initialized successfully."
+
+
+  db-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: search-engine-db-init
+    restart: "no"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-search_user}:${POSTGRES_PASSWORD:-search_password}@postgres:5432/${POSTGRES_DB:-search_engine}
+
+    command:
+      [
+        "python",
+        "-m",
+        "services.search_api.init_db"
+      ]
+
+
+  shard-0:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: search-engine-shard-0
+    restart: unless-stopped
+
+    environment:
+      SHARD_ID: shard-0
+      SHARD_HOST: 0.0.0.0
+      SHARD_PORT: 8001
+      SHARD_DATA_PATH: /data/shard-0
+
+    ports:
+      - "8100:8001"
+
+    volumes:
+      - shard_0_data:/data/shard-0
+      - model_cache:/root/.cache/huggingface
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; r=urllib.request.urlopen('http://localhost:8001/health', timeout=3); raise SystemExit(0 if r.status == 200 else 1)"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+    command:
+      [
+        "python",
+        "-m",
+        "services.shard.main"
+      ]
+
+
+  shard-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: search-engine-shard-1
+    restart: unless-stopped
+
+    environment:
+      SHARD_ID: shard-1
+      SHARD_HOST: 0.0.0.0
+      SHARD_PORT: 8001
+      SHARD_DATA_PATH: /data/shard-1
+
+    ports:
+      - "8101:8001"
+
+    volumes:
+      - shard_1_data:/data/shard-1
+      - model_cache:/root/.cache/huggingface
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; r=urllib.request.urlopen('http://localhost:8001/health', timeout=3); raise SystemExit(0 if r.status == 200 else 1)"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+    command:
+      [
+        "python",
+        "-m",
+        "services.shard.main"
+      ]
+
+
+  shard-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: search-engine-shard-2
+    restart: unless-stopped
+
+    environment:
+      SHARD_ID: shard-2
+      SHARD_HOST: 0.0.0.0
+      SHARD_PORT: 8001
+      SHARD_DATA_PATH: /data/shard-2
+
+    ports:
+      - "8102:8001"
+
+    volumes:
+      - shard_2_data:/data/shard-2
+      - model_cache:/root/.cache/huggingface
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; r=urllib.request.urlopen('http://localhost:8001/health', timeout=3); raise SystemExit(0 if r.status == 200 else 1)"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+    command:
+      [
+        "python",
+        "-m",
+        "services.shard.main"
+      ]
+
+
+  indexer-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: search-engine-indexer-worker
+    restart: unless-stopped
+
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+      db-init:
+        condition: service_completed_successfully
+
+      shard-0:
+        condition: service_healthy
+
+      shard-1:
+        condition: service_healthy
+
+      shard-2:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-search_user}:${POSTGRES_PASSWORD:-search_password}@postgres:5432/${POSTGRES_DB:-search_engine}
+
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+      KAFKA_DOCUMENT_EVENTS_TOPIC: ${KAFKA_DOCUMENT_EVENTS_TOPIC:-document-events}
+
+      KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC: ${KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC:-document-events-dlq}
+
+      KAFKA_INDEXER_GROUP_ID: ${KAFKA_INDEXER_GROUP_ID:-indexer-workers}
+
+      INDEXER_SHARD_URLS: shard-0=http://shard-0:8001,shard-1=http://shard-1:8001,shard-2=http://shard-2:8001
+
+      INDEXER_READY_FILE: /tmp/indexer-worker-ready
+
+    volumes:
+      - model_cache:/root/.cache/huggingface
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f /tmp/indexer-worker-ready"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+    command:
+      [
+        "python",
+        "-m",
+        "services.indexer.worker_service"
+      ]
+
+
+  index-bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: search-engine-index-bootstrap
+    restart: "no"
+
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+      db-init:
+        condition: service_completed_successfully
+
+      shard-0:
+        condition: service_healthy
+
+      shard-1:
+        condition: service_healthy
+
+      shard-2:
+        condition: service_healthy
+
+      indexer-worker:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-search_user}:${POSTGRES_PASSWORD:-search_password}@postgres:5432/${POSTGRES_DB:-search_engine}
+
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+      KAFKA_DOCUMENT_EVENTS_TOPIC: ${KAFKA_DOCUMENT_EVENTS_TOPIC:-document-events}
+
+      KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC: ${KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC:-document-events-dlq}
+
+      KAFKA_INDEXER_GROUP_ID: ${KAFKA_INDEXER_GROUP_ID:-indexer-workers}
+
+      INDEXER_SHARD_URLS: shard-0=http://shard-0:8001,shard-1=http://shard-1:8001,shard-2=http://shard-2:8001
+
+      INDEX_BOOTSTRAP_TIMEOUT_SECONDS: ${INDEX_BOOTSTRAP_TIMEOUT_SECONDS:-120}
+
+      INDEX_BOOTSTRAP_POLL_INTERVAL_SECONDS: ${INDEX_BOOTSTRAP_POLL_INTERVAL_SECONDS:-1}
+
+    volumes:
+      - model_cache:/root/.cache/huggingface
+
+    command:
+      [
+        "python",
+        "-m",
+        "services.bootstrap.index_bootstrap"
+      ]
+
+
+  search-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: search-engine-search-api
+    restart: unless-stopped
+
+    depends_on:
+      index-bootstrap:
+        condition: service_completed_successfully
+
+      db-init:
+        condition: service_completed_successfully
+
+      shard-0:
+        condition: service_healthy
+
+      shard-1:
+        condition: service_healthy
+
+      shard-2:
+        condition: service_healthy
+
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-search_user}:${POSTGRES_PASSWORD:-search_password}@postgres:5432/${POSTGRES_DB:-search_engine}
+
+      INDEXER_SHARD_URLS: shard-0=http://shard-0:8001,shard-1=http://shard-1:8001,shard-2=http://shard-2:8001
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      - model_cache:/root/.cache/huggingface
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; r=urllib.request.urlopen('http://localhost:8000/health', timeout=3); raise SystemExit(0 if r.status == 200 else 1)"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+    command:
+      [
+        "uvicorn",
+        "services.search_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000"
+      ]
+
 
 volumes:
   postgres_data:
   kafka_data:
+  shard_0_data:
+  shard_1_data:
+  shard_2_data:
+  model_cache:

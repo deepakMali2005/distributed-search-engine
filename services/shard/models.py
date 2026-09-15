@@ -39,3 +39,8 @@ class SearchResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     shard_id: str
+
+
+class DocumentPresenceResponse(BaseModel):
+    document_id: int
+    shard_id: str

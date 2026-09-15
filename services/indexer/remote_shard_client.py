@@ -192,3 +192,55 @@ class HttpShardIndexClient:
                 f"Shard {self.shard_id} is unavailable.",
                 retryable=True,
             ) from exc
+
+    def contains_document(
+        self,
+        document_id: int,
+    ) -> bool:
+        """
+        Check whether the remote shard currently contains
+        the document.
+        """
+
+        request = Request(
+            f"{self.base_url}/documents/{document_id}",
+            method="GET",
+            headers={
+                "Accept": "application/json",
+            },
+        )
+
+        try:
+            with urlopen(
+                request,
+                timeout=self.timeout_seconds,
+            ) as response:
+                if response.status != 200:
+                    return False
+
+                response.read()
+
+                return True
+
+        except HTTPError as exc:
+            if exc.code == 404:
+                return False
+
+            raise ShardIndexError(
+                (
+                    f"Shard {self.shard_id} "
+                    f"returned HTTP {exc.code} "
+                    "while checking document."
+                ),
+                retryable=exc.code >= 500,
+            ) from exc
+
+        except (
+            URLError,
+            TimeoutError,
+            OSError,
+        ) as exc:
+            raise ShardIndexError(
+                f"Shard {self.shard_id} is unavailable.",
+                retryable=True,
+            ) from exc

@@ -19,7 +19,6 @@ from services.events.producer import DocumentEventProducer
 from services.indexer.analyzer import TextAnalyzer
 from services.indexer.shard_manager import ShardManager
 from services.indexer.shard_router import ShardRouter
-from services.search_api.database import SessionLocal
 from services.semantic.embedding import EmbeddingModel
 from services.semantic.models import Embedding
 from services.storage.document_index_versions import (
@@ -58,13 +57,13 @@ class IndexerWorker:
     The worker supports two indexing modes:
 
     1. Local mode:
-        Kafka → local ShardManager
+        Kafka -> local ShardManager
 
        Used by unit/integration tests and local in-process
        indexing scenarios.
 
     2. Distributed mode:
-        Kafka → ShardRouter → remote shard clients
+        Kafka -> ShardRouter -> remote shard clients
 
        Used by the real distributed worker service.
 
@@ -74,6 +73,10 @@ class IndexerWorker:
     PostgreSQL stores:
     - processed event IDs for duplicate-event protection
     - latest indexed document version for stale-event protection
+
+    Bootstrap events are used to repair missing shard state when the
+    canonical PostgreSQL document exists but its owning shard does not
+    contain the document.
     """
 
     def __init__(
@@ -153,17 +156,11 @@ class IndexerWorker:
                     f"No shard client configured for {shard_id}"
                 )
 
-            if embedding is None:
-                client.index_document(
-                    document_id=document_id,
-                    tokens=tokens,
-                )
-            else:
-                client.index_document(
-                    document_id=document_id,
-                    tokens=tokens,
-                    embedding=embedding,
-                )
+            client.index_document(
+                document_id=document_id,
+                tokens=tokens,
+                embedding=embedding,
+            )
 
             return
 
@@ -172,17 +169,11 @@ class IndexerWorker:
                 "No shard indexing backend is configured."
             )
 
-        if embedding is None:
-            self.shard_manager.index_document(
-                document_id=document_id,
-                tokens=tokens,
-            )
-        else:
-            self.shard_manager.index_document(
-                document_id=document_id,
-                tokens=tokens,
-                embedding=embedding,
-            )
+        self.shard_manager.index_document(
+            document_id=document_id,
+            tokens=tokens,
+            embedding=embedding,
+        )
 
     def _delete_document(
         self,
@@ -212,6 +203,7 @@ class IndexerWorker:
             client.delete_document(
                 document_id=document_id
             )
+
             return
 
         if self.shard_manager is None:
@@ -221,6 +213,46 @@ class IndexerWorker:
 
         self.shard_manager.remove_document(
             document_id
+        )
+
+    @staticmethod
+    def _build_lexical_text(
+        title: str | None,
+        content: str,
+    ) -> str:
+        """
+        Build the text used by the lexical analyzer.
+
+        The document title is included because it is part of the
+        searchable document representation.
+
+        Empty titles are ignored.
+        """
+
+        title = (title or "").strip()
+        content = (content or "").strip()
+
+        if title and content:
+            return f"{title}\n{content}"
+
+        return title or content
+
+    def _analyze_document(
+        self,
+        title: str | None,
+        content: str,
+    ) -> list[str]:
+        """
+        Convert the canonical document into lexical index tokens.
+        """
+
+        lexical_text = self._build_lexical_text(
+            title=title,
+            content=content,
+        )
+
+        return self.analyzer.analyze(
+            lexical_text
         )
 
     def process_event(
@@ -240,6 +272,7 @@ class IndexerWorker:
             self._delete_document(
                 event.document_id
             )
+
             return True
 
         document = get_document(
@@ -269,12 +302,15 @@ class IndexerWorker:
                 f"{event.document_id}"
             )
 
-        tokens = self.analyzer.analyze(
-            document.content
+        tokens = self._analyze_document(
+            title=document.title,
+            content=document.content,
         )
 
         embedding = (
-            self.embedding_model.embed(document.content)
+            self.embedding_model.embed(
+                document.content
+            )
             if self.embedding_model is not None
             else None
         )
@@ -333,10 +369,10 @@ class IndexerWorker:
             self.consumer.commit(
                 message
             )
+
             return
 
-        # DELETED events are handled directly because there is no
-        # canonical document to read after deletion.
+        # Deleted events do not require a PostgreSQL document lookup.
         if event.event_type == DocumentEventType.DELETED:
             self.process_event(
                 event
@@ -350,6 +386,7 @@ class IndexerWorker:
             self.consumer.commit(
                 message
             )
+
             return
 
         document = get_document(
@@ -362,6 +399,10 @@ class IndexerWorker:
                 f"Document {event.document_id} does not exist in PostgreSQL"
             )
 
+        is_bootstrap_event = bool(
+            event.metadata.get("bootstrap")
+        )
+
         latest_indexed_version = (
             get_latest_indexed_version(
                 db=self.db,
@@ -369,9 +410,24 @@ class IndexerWorker:
             )
         )
 
+        # Bootstrap events intentionally bypass the previous
+        # indexed-version check.
+        #
+        # This repairs the case where:
+        #
+        # PostgreSQL index-version = indexed
+        # actual shard state    = missing
+        #
+        # Without this exception, reconciliation could discover the
+        # missing shard document but the worker would reject the
+        # repair event as stale.
         version_state = classify_event_version(
             event_version=event.event_version,
-            latest_indexed_version=latest_indexed_version,
+            latest_indexed_version=(
+                None
+                if is_bootstrap_event
+                else latest_indexed_version
+            ),
             document_version=document.version,
         )
 
@@ -384,6 +440,7 @@ class IndexerWorker:
             self.consumer.commit(
                 message
             )
+
             return
 
         if version_state == EventVersionState.FUTURE:
@@ -400,12 +457,15 @@ class IndexerWorker:
                 f"{event.document_id}"
             )
 
-        tokens = self.analyzer.analyze(
-            document.content
+        tokens = self._analyze_document(
+            title=document.title,
+            content=document.content,
         )
 
         embedding = (
-            self.embedding_model.embed(document.content)
+            self.embedding_model.embed(
+                document.content
+            )
             if self.embedding_model is not None
             else None
         )
@@ -457,6 +517,7 @@ class IndexerWorker:
                 self.process_message(
                     message
                 )
+
                 return
 
             except Exception as exc:
@@ -502,6 +563,13 @@ class IndexerWorker:
         return True
 
     def run(self) -> None:
+        """
+        Run the worker directly.
+
+        This method is primarily useful for standalone execution.
+        The production worker service uses IndexerWorkerService.
+        """
+
         self.consumer.subscribe()
 
         try:

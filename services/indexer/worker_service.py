@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+from pathlib import Path
 from types import FrameType
 
 from services.events.consumer import DocumentEventConsumer
@@ -20,6 +21,10 @@ DEFAULT_SHARD_URLS = {
     "shard-2": "http://127.0.0.1:8102",
 }
 
+DEFAULT_READY_FILE = (
+    "/tmp/indexer-worker-ready"
+)
+
 
 class IndexerWorkerService:
     """
@@ -28,6 +33,10 @@ class IndexerWorkerService:
     Multiple instances of this service can run simultaneously.
     Kafka's consumer group distributes topic partitions across
     those instances automatically.
+
+    The service creates a readiness file only after the Kafka
+    consumer has subscribed and completed an initial poll cycle.
+    Docker uses this file as the service health signal.
     """
 
     def __init__(
@@ -35,10 +44,15 @@ class IndexerWorkerService:
         worker: IndexerWorker,
         consumer: DocumentEventConsumer,
         db,
+        *,
+        ready_file: str = DEFAULT_READY_FILE,
     ) -> None:
         self.worker = worker
         self.consumer = consumer
         self.db = db
+        self.ready_file = Path(
+            ready_file
+        )
         self._shutdown_requested = False
 
     def request_shutdown(
@@ -52,18 +66,54 @@ class IndexerWorkerService:
 
         self._shutdown_requested = True
 
+    def _mark_ready(self) -> None:
+        """
+        Mark the worker as ready for dependent services.
+        """
+
+        self.ready_file.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.ready_file.touch()
+
+    def _clear_ready(self) -> None:
+        """
+        Remove the readiness marker.
+        """
+
+        try:
+            self.ready_file.unlink()
+        except FileNotFoundError:
+            pass
+
     def run(self) -> None:
         """
         Start consuming and processing Kafka events.
         """
 
+        self._clear_ready()
+
         self.consumer.subscribe()
 
         try:
+            # Perform an initial poll before reporting readiness.
+            #
+            # This forces the Kafka consumer to establish its
+            # connection/assignment lifecycle before bootstrap is
+            # allowed to publish repair events.
+            self.worker.run_once(
+                timeout=1.0
+            )
+
+            self._mark_ready()
+
             while not self._shutdown_requested:
                 self.worker.run_once()
 
         finally:
+            self._clear_ready()
             self.close()
 
     def close(self) -> None:
@@ -177,7 +227,9 @@ def create_worker_service() -> IndexerWorkerService:
         for shard_id, url in shard_urls.items()
     }
 
-    embedding_model = SentenceTransformerEmbeddingModel()
+    embedding_model = (
+        SentenceTransformerEmbeddingModel()
+    )
 
     worker = IndexerWorker(
         db=db,
@@ -192,6 +244,10 @@ def create_worker_service() -> IndexerWorkerService:
         worker=worker,
         consumer=consumer,
         db=db,
+        ready_file=os.getenv(
+            "INDEXER_READY_FILE",
+            DEFAULT_READY_FILE,
+        ),
     )
 
 
