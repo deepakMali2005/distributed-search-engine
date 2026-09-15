@@ -18,15 +18,15 @@ from services.indexer.shard_manifest import ShardManifest
 
 class JsonShardPersistence:
     """
-    Persist each shard as immutable segments plus an atomic manifest.
+    Persist each shard as immutable lexical + semantic segments plus
+    an atomic manifest.
 
     A new segment is fully written before the manifest is replaced.
+    The manifest therefore remains the publication point for a shard
+    generation.
 
-    The manifest therefore acts as the publication point for a
-    shard generation.
-
-    Older segments remain on disk until an explicit cleanup
-    policy is added.
+    Older segments remain on disk until an explicit cleanup policy is
+    added.
     """
 
     MANIFEST_NAME = "manifest.json"
@@ -37,28 +37,20 @@ class JsonShardPersistence:
         root_directory: str | Path = "data/index/shards",
     ) -> None:
         self.root_directory = Path(root_directory)
-
         self.writer = SegmentWriter()
         self.reader = SegmentReader()
 
     def shard_directory(self, shard_id: str) -> Path:
         self._validate_shard_id(shard_id)
-
         return self.root_directory / shard_id
 
     def manifest_path(self, shard_id: str) -> Path:
-        return (
-            self.shard_directory(shard_id)
-            / self.MANIFEST_NAME
-        )
+        return self.shard_directory(shard_id) / self.MANIFEST_NAME
 
     def exists(self, shard_id: str) -> bool:
         return self.manifest_path(shard_id).is_file()
 
-    def read_manifest(
-        self,
-        shard_id: str,
-    ) -> ShardManifest:
+    def read_manifest(self, shard_id: str) -> ShardManifest:
         path = self.manifest_path(shard_id)
 
         if not path.is_file():
@@ -71,34 +63,19 @@ class JsonShardPersistence:
 
         if manifest.shard_id != shard_id:
             raise ValueError(
-                f"Shard manifest belongs to "
-                f"{manifest.shard_id!r}, not {shard_id!r}."
+                f"Shard manifest belongs to {manifest.shard_id!r}, "
+                f"not {shard_id!r}."
             )
 
         return manifest
 
     def save(self, shard: Shard) -> ShardManifest:
-        """
-        Persist the current shard state.
-
-        The segment is written first.
-
-        Only after the segment is safely written do we
-        atomically replace the manifest.
-        """
-
-        shard.set_lifecycle_state(
-            ShardLifecycleState.PERSISTING
-        )
+        """Persist the complete current shard state."""
+        shard.set_lifecycle_state(ShardLifecycleState.PERSISTING)
 
         try:
-            shard_dir = self.shard_directory(
-                shard.shard_id
-            )
-
-            segments_dir = (
-                shard_dir / self.SEGMENTS_DIRECTORY
-            )
+            shard_dir = self.shard_directory(shard.shard_id)
+            segments_dir = shard_dir / self.SEGMENTS_DIRECTORY
 
             segments_dir.mkdir(
                 parents=True,
@@ -108,33 +85,24 @@ class JsonShardPersistence:
             previous_generation = -1
 
             if self.exists(shard.shard_id):
-                previous_generation = (
-                    self.read_manifest(
-                        shard.shard_id
-                    ).generation
-                )
+                previous_generation = self.read_manifest(
+                    shard.shard_id
+                ).generation
 
             generation = previous_generation + 1
-
-            segment_id = (
-                f"segment-{generation:06d}"
-            )
+            segment_id = f"segment-{generation:06d}"
 
             segment = IndexSegment(
                 segment_id=segment_id,
-                path=(
-                    segments_dir
-                    / f"{segment_id}.json"
-                ),
+                path=segments_dir / f"{segment_id}.json",
             )
 
-            # 1. Write immutable segment.
             self.writer.write(
                 index=shard.index,
                 segment=segment,
+                vector_index=shard.vector_index,
             )
 
-            # 2. Build new manifest.
             manifest = ShardManifest(
                 shard_id=shard.shard_id,
                 generation=generation,
@@ -143,10 +111,7 @@ class JsonShardPersistence:
                 document_count=shard.document_count,
             )
 
-            # 3. Publish the new generation atomically.
-            self._write_manifest_atomically(
-                manifest
-            )
+            self._write_manifest_atomically(manifest)
 
             shard.set_lifecycle_state(
                 ShardLifecycleState.READY
@@ -161,14 +126,7 @@ class JsonShardPersistence:
             raise
 
     def load(self, shard: Shard) -> bool:
-        """
-        Load the currently published shard generation.
-
-        Returns:
-            True  -> shard existed and was loaded.
-            False -> no persisted shard exists.
-        """
-
+        """Load the currently published shard generation."""
         if not self.exists(shard.shard_id):
             shard.set_lifecycle_state(
                 ShardLifecycleState.NEW
@@ -185,6 +143,7 @@ class JsonShardPersistence:
             )
 
             shard.index.clear()
+            shard.vector_index.clear()
 
             segments_dir = (
                 self.shard_directory(shard.shard_id)
@@ -194,10 +153,7 @@ class JsonShardPersistence:
             for segment_id in manifest.active_segments:
                 segment = IndexSegment(
                     segment_id=segment_id,
-                    path=(
-                        segments_dir
-                        / f"{segment_id}.json"
-                    ),
+                    path=segments_dir / f"{segment_id}.json",
                 )
 
                 if not segment.path.is_file():
@@ -205,23 +161,26 @@ class JsonShardPersistence:
                         segment.path
                     )
 
-                loaded_index = self.reader.read(
+                snapshot = self.reader.read_snapshot(
                     segment
                 )
 
                 self._merge_index(
                     target=shard.index,
-                    source=loaded_index,
+                    source=snapshot.index,
                 )
 
-            if (
-                shard.document_count
-                != manifest.document_count
-            ):
+                self._merge_vectors(
+                    target=shard.vector_index,
+                    source=snapshot.vector_index,
+                )
+
+            self._validate_vector_ownership(shard)
+
+            if shard.document_count != manifest.document_count:
                 raise ValueError(
-                    f"Shard {shard.shard_id} "
-                    "document count does not match "
-                    "its manifest."
+                    f"Shard {shard.shard_id} document count "
+                    "does not match its manifest."
                 )
 
             shard.set_lifecycle_state(
@@ -237,9 +196,7 @@ class JsonShardPersistence:
             raise
 
     def delete(self, shard_id: str) -> bool:
-        directory = self.shard_directory(
-            shard_id
-        )
+        directory = self.shard_directory(shard_id)
 
         if not directory.exists():
             return False
@@ -250,12 +207,10 @@ class JsonShardPersistence:
         ):
             if path.is_file() or path.is_symlink():
                 path.unlink()
-
             elif path.is_dir():
                 path.rmdir()
 
         directory.rmdir()
-
         return True
 
     def _write_manifest_atomically(
@@ -307,9 +262,7 @@ class JsonShardPersistence:
         target: InvertedIndex,
         source: InvertedIndex,
     ) -> None:
-        for doc_id, length in (
-            source.document_lengths.items()
-        ):
+        for doc_id, length in source.document_lengths.items():
             target.set_document_length(
                 doc_id,
                 length,
@@ -322,11 +275,44 @@ class JsonShardPersistence:
                     Posting(
                         doc_id=posting.doc_id,
                         term_frequency=posting.term_frequency,
-                        positions=list(
-                            posting.positions
-                        ),
+                        positions=list(posting.positions),
                     ),
                 )
+
+    @staticmethod
+    def _merge_vectors(
+        target,
+        source,
+    ) -> None:
+        for doc_id in sorted(
+            source.document_ids
+        ):
+            embedding = source.get_embedding(
+                doc_id
+            )
+
+            assert embedding is not None
+
+            target.add_document(
+                doc_id,
+                embedding,
+            )
+
+    @staticmethod
+    def _validate_vector_ownership(
+        shard: Shard,
+    ) -> None:
+        lexical_ids = shard.index.document_ids
+        vector_ids = shard.vector_index.document_ids
+
+        orphaned = vector_ids - lexical_ids
+
+        if orphaned:
+            raise ValueError(
+                "Persisted vector index contains documents "
+                "that are not owned by shard "
+                f"{shard.shard_id!r}: {sorted(orphaned)}"
+            )
 
     @staticmethod
     def _validate_shard_id(

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 from dataclasses import dataclass
@@ -5,37 +7,38 @@ from pathlib import Path
 from typing import Any
 
 from services.indexer.index import InvertedIndex, Posting
+from services.semantic.models import Embedding
+from services.semantic.vector_index import VectorIndex
 
 
 @dataclass(frozen=True)
 class IndexSegment:
-    """
-    Represents one immutable index segment.
-
-    A segment is a self-contained snapshot of an inverted index.
-    Once written, it should not be modified.
-    """
+    """Represents one immutable lexical + semantic index segment."""
 
     segment_id: str
     path: Path
 
 
-class SegmentWriter:
-    """
-    Writes an InvertedIndex to an immutable segment.
-    """
+@dataclass(frozen=True)
+class SegmentSnapshot:
+    """The complete persisted state represented by one segment."""
 
-    FORMAT_VERSION = 1
+    index: InvertedIndex
+    vector_index: VectorIndex
+
+
+class SegmentWriter:
+    """Writes an InvertedIndex and optional VectorIndex to one immutable segment."""
+
+    FORMAT_VERSION = 2
 
     def write(
         self,
         index: InvertedIndex,
         segment: IndexSegment,
+        vector_index: VectorIndex | None = None,
     ) -> None:
-        """
-        Write the index to disk as a segment.
-        """
-
+        """Write the complete shard snapshot to disk atomically."""
         segment.path.parent.mkdir(
             parents=True,
             exist_ok=True,
@@ -44,6 +47,7 @@ class SegmentWriter:
         data = self._serialize(
             index=index,
             segment_id=segment.segment_id,
+            vector_index=vector_index,
         )
 
         temporary_path = segment.path.with_suffix(
@@ -60,9 +64,9 @@ class SegmentWriter:
                 ensure_ascii=False,
                 indent=2,
             )
+            file.flush()
+            os.fsync(file.fileno())
 
-        # Atomic replacement prevents a partially-written
-        # segment from becoming visible.
         os.replace(
             temporary_path,
             segment.path,
@@ -72,16 +76,13 @@ class SegmentWriter:
         self,
         index: InvertedIndex,
         segment_id: str,
+        vector_index: VectorIndex | None = None,
     ) -> dict[str, Any]:
-        """
-        Convert an InvertedIndex into JSON-serializable data.
-        """
-
+        """Convert a shard snapshot into JSON-serializable data."""
         terms: dict[str, Any] = {}
 
         for term in index.terms:
             postings = index.get_postings(term)
-
             terms[term] = {}
 
             for posting in postings:
@@ -90,33 +91,50 @@ class SegmentWriter:
                     "positions": posting.positions,
                 }
 
+        vectors: dict[str, Any] = {}
+
+        if vector_index is not None:
+            for doc_id in sorted(vector_index.document_ids):
+                embedding = vector_index.get_embedding(doc_id)
+                assert embedding is not None
+                vectors[str(doc_id)] = list(embedding.values)
+
         return {
             "format_version": self.FORMAT_VERSION,
             "segment_id": segment_id,
             "terms": terms,
             "document_lengths": {
                 str(doc_id): length
-                for doc_id, length
-                in index.document_lengths.items()
+                for doc_id, length in index.document_lengths.items()
             },
+            "vectors": vectors,
         }
 
 
 class SegmentReader:
-    """
-    Loads an immutable index segment from disk.
-    """
+    """Loads immutable lexical + semantic index segments from disk."""
 
-    FORMAT_VERSION = 1
+    LEGACY_FORMAT_VERSION = 1
+    FORMAT_VERSION = 2
 
     def read(
         self,
         segment: IndexSegment,
     ) -> InvertedIndex:
         """
-        Load a segment from disk.
-        """
+        Load only the lexical index.
 
+        This preserves the original SegmentReader API used by the
+        lexical segment manager. New shard persistence should use
+        read_snapshot() so semantic vectors are restored as well.
+        """
+        return self.read_snapshot(segment).index
+
+    def read_snapshot(
+        self,
+        segment: IndexSegment,
+    ) -> SegmentSnapshot:
+        """Load the complete lexical + semantic segment snapshot."""
         if not segment.path.exists():
             raise FileNotFoundError(
                 f"Segment not found: {segment.path}"
@@ -128,24 +146,31 @@ class SegmentReader:
         ) as file:
             data = json.load(file)
 
-        if data.get("format_version") != self.FORMAT_VERSION:
+        format_version = data.get("format_version")
+
+        if format_version not in (
+            self.LEGACY_FORMAT_VERSION,
+            self.FORMAT_VERSION,
+        ):
             raise ValueError(
                 "Unsupported segment format version."
             )
 
-        return self._deserialize(data)
+        index = self._deserialize_index(data)
+        vector_index = self._deserialize_vectors(data)
 
-    def _deserialize(
+        return SegmentSnapshot(
+            index=index,
+            vector_index=vector_index,
+        )
+
+    def _deserialize_index(
         self,
         data: dict[str, Any],
     ) -> InvertedIndex:
-        """
-        Convert persisted segment data back into an InvertedIndex.
-        """
-
+        """Convert persisted lexical data back into an InvertedIndex."""
         index = InvertedIndex()
 
-        # Restore document lengths.
         for doc_id, length in data.get(
             "document_lengths",
             {},
@@ -155,7 +180,6 @@ class SegmentReader:
                 length=int(length),
             )
 
-        # Restore postings.
         for term, postings in data.get(
             "terms",
             {},
@@ -178,3 +202,26 @@ class SegmentReader:
                 )
 
         return index
+
+    def _deserialize_vectors(
+        self,
+        data: dict[str, Any],
+    ) -> VectorIndex:
+        """Restore persisted document embeddings."""
+        vector_index = VectorIndex()
+
+        for doc_id, values in data.get(
+            "vectors",
+            {},
+        ).items():
+            if not isinstance(values, list):
+                raise ValueError(
+                    "Invalid persisted vector data."
+                )
+
+            vector_index.add_document(
+                doc_id=int(doc_id),
+                embedding=Embedding(values),
+            )
+
+        return vector_index
