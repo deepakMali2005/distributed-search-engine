@@ -578,3 +578,4 @@ class IndexerWorker:
 
         finally:
             self.consumer.close()
+            

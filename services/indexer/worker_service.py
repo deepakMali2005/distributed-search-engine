@@ -21,9 +21,7 @@ DEFAULT_SHARD_URLS = {
     "shard-2": "http://127.0.0.1:8102",
 }
 
-DEFAULT_READY_FILE = (
-    "/tmp/indexer-worker-ready"
-)
+DEFAULT_READY_FILE = "/tmp/indexer-worker-ready"
 
 
 class IndexerWorkerService:
@@ -34,9 +32,8 @@ class IndexerWorkerService:
     Kafka's consumer group distributes topic partitions across
     those instances automatically.
 
-    The service creates a readiness file only after the Kafka
-    consumer has subscribed and completed an initial poll cycle.
-    Docker uses this file as the service health signal.
+    A readiness file is used by Docker to determine whether the
+    worker has successfully entered its Kafka polling loop.
     """
 
     def __init__(
@@ -44,7 +41,6 @@ class IndexerWorkerService:
         worker: IndexerWorker,
         consumer: DocumentEventConsumer,
         db,
-        *,
         ready_file: str = DEFAULT_READY_FILE,
     ) -> None:
         self.worker = worker
@@ -66,9 +62,19 @@ class IndexerWorkerService:
 
         self._shutdown_requested = True
 
+    def _clear_ready_file(self) -> None:
+        """
+        Remove the readiness marker if it exists.
+        """
+
+        try:
+            self.ready_file.unlink()
+        except FileNotFoundError:
+            pass
+
     def _mark_ready(self) -> None:
         """
-        Mark the worker as ready for dependent services.
+        Create the readiness marker.
         """
 
         self.ready_file.parent.mkdir(
@@ -78,34 +84,20 @@ class IndexerWorkerService:
 
         self.ready_file.touch()
 
-    def _clear_ready(self) -> None:
-        """
-        Remove the readiness marker.
-        """
-
-        try:
-            self.ready_file.unlink()
-        except FileNotFoundError:
-            pass
-
     def run(self) -> None:
         """
         Start consuming and processing Kafka events.
         """
 
-        self._clear_ready()
+        self._clear_ready_file()
 
         self.consumer.subscribe()
 
         try:
-            # Perform an initial poll before reporting readiness.
-            #
-            # This forces the Kafka consumer to establish its
-            # connection/assignment lifecycle before bootstrap is
-            # allowed to publish repair events.
-            self.worker.run_once(
-                timeout=1.0
-            )
+            # Perform one initial poll before marking the service
+            # as ready. run_once() already defaults to a one-second
+            # poll timeout, so there is no need to pass timeout=1.0.
+            self.worker.run_once()
 
             self._mark_ready()
 
@@ -113,7 +105,7 @@ class IndexerWorkerService:
                 self.worker.run_once()
 
         finally:
-            self._clear_ready()
+            self._clear_ready_file()
             self.close()
 
     def close(self) -> None:
@@ -121,6 +113,7 @@ class IndexerWorkerService:
         Release service resources.
         """
 
+        self._clear_ready_file()
         self.consumer.close()
         self.db.close()
 
@@ -227,9 +220,7 @@ def create_worker_service() -> IndexerWorkerService:
         for shard_id, url in shard_urls.items()
     }
 
-    embedding_model = (
-        SentenceTransformerEmbeddingModel()
-    )
+    embedding_model = SentenceTransformerEmbeddingModel()
 
     worker = IndexerWorker(
         db=db,
@@ -244,10 +235,6 @@ def create_worker_service() -> IndexerWorkerService:
         worker=worker,
         consumer=consumer,
         db=db,
-        ready_file=os.getenv(
-            "INDEXER_READY_FILE",
-            DEFAULT_READY_FILE,
-        ),
     )
 
 
