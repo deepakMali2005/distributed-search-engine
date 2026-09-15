@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Query
 
 from services.indexer.index import InvertedIndex
 from services.indexer.shard import Shard
+from services.semantic.models import Embedding
 from services.shard.config import ShardServiceConfig
 from services.shard.models import (
     DeleteDocumentResponse,
@@ -127,15 +128,23 @@ def create_app(
     def index_document(
         request: IndexDocumentRequest,
     ) -> IndexDocumentResponse:
+        embedding = (
+            Embedding(request.embedding)
+            if request.embedding is not None
+            else None
+        )
+
         if service is not None:
             service.index_document(
                 document_id=request.document_id,
                 tokens=request.tokens,
+                embedding=embedding,
             )
         else:
             active_shard.add_document(
                 doc_id=request.document_id,
                 tokens=request.tokens,
+                embedding=embedding,
             )
 
         return IndexDocumentResponse(

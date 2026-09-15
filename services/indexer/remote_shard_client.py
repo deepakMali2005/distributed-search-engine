@@ -4,6 +4,8 @@ import json
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from services.semantic.models import Embedding
+
 
 class ShardIndexError(RuntimeError):
     """
@@ -68,16 +70,24 @@ class HttpShardIndexClient:
         self,
         document_id: int,
         tokens: list[str],
+        embedding: Embedding | None = None,
     ) -> None:
         """
         Index an already-analyzed document on the remote shard.
         """
 
+        payload_data = {
+            "document_id": document_id,
+            "tokens": tokens,
+        }
+
+        if embedding is not None:
+            payload_data["embedding"] = list(
+                embedding.values
+            )
+
         payload = json.dumps(
-            {
-                "document_id": document_id,
-                "tokens": tokens,
-            }
+            payload_data
         ).encode("utf-8")
 
         request = Request(
@@ -161,8 +171,6 @@ class HttpShardIndexClient:
                 response.read()
 
         except HTTPError as exc:
-            # A 404 means the document is already absent from the
-            # shard, which is safe for an idempotent delete.
             if exc.code == 404:
                 return
 

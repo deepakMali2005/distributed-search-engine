@@ -11,6 +11,7 @@ from services.indexer.remote_shard_client import (
 from services.indexer.shard_router import ShardRouter
 from services.indexer.worker import IndexerWorker
 from services.search_api.database import SessionLocal
+from services.semantic.embedding import SentenceTransformerEmbeddingModel
 
 
 DEFAULT_SHARD_URLS = {
@@ -176,10 +177,13 @@ def create_worker_service() -> IndexerWorkerService:
         for shard_id, url in shard_urls.items()
     }
 
+    embedding_model = SentenceTransformerEmbeddingModel()
+
     worker = IndexerWorker(
         db=db,
         shard_manager=None,
         consumer=consumer,
+        embedding_model=embedding_model,
         shard_router=router,
         shard_clients=shard_clients,
     )

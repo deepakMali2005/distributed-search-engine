@@ -20,6 +20,8 @@ from services.indexer.analyzer import TextAnalyzer
 from services.indexer.shard_manager import ShardManager
 from services.indexer.shard_router import ShardRouter
 from services.search_api.database import SessionLocal
+from services.semantic.embedding import EmbeddingModel
+from services.semantic.models import Embedding
 from services.storage.document_index_versions import (
     get_latest_indexed_version,
     record_indexed_version,
@@ -38,6 +40,7 @@ class ShardIndexClient(Protocol):
         self,
         document_id: int,
         tokens: list[str],
+        embedding: Embedding | None = None,
     ) -> None:
         ...
 
@@ -79,6 +82,7 @@ class IndexerWorker:
         shard_manager: ShardManager | None,
         consumer: DocumentEventConsumer,
         analyzer: TextAnalyzer | None = None,
+        embedding_model: EmbeddingModel | None = None,
         max_retries: int = 3,
         retry_delay: float = 1.0,
         dlq_producer: DocumentEventProducer | None = None,
@@ -115,6 +119,7 @@ class IndexerWorker:
         self.shard_manager = shard_manager
         self.consumer = consumer
         self.analyzer = analyzer or TextAnalyzer()
+        self.embedding_model = embedding_model
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.dlq_producer = dlq_producer
@@ -125,6 +130,7 @@ class IndexerWorker:
         self,
         document_id: int,
         tokens: list[str],
+        embedding: Embedding | None = None,
     ) -> None:
         """
         Index a document using either the local or distributed
@@ -147,10 +153,18 @@ class IndexerWorker:
                     f"No shard client configured for {shard_id}"
                 )
 
-            client.index_document(
-                document_id=document_id,
-                tokens=tokens,
-            )
+            if embedding is None:
+                client.index_document(
+                    document_id=document_id,
+                    tokens=tokens,
+                )
+            else:
+                client.index_document(
+                    document_id=document_id,
+                    tokens=tokens,
+                    embedding=embedding,
+                )
+
             return
 
         if self.shard_manager is None:
@@ -158,10 +172,17 @@ class IndexerWorker:
                 "No shard indexing backend is configured."
             )
 
-        self.shard_manager.index_document(
-            document_id=document_id,
-            tokens=tokens,
-        )
+        if embedding is None:
+            self.shard_manager.index_document(
+                document_id=document_id,
+                tokens=tokens,
+            )
+        else:
+            self.shard_manager.index_document(
+                document_id=document_id,
+                tokens=tokens,
+                embedding=embedding,
+            )
 
     def _delete_document(
         self,
@@ -252,9 +273,16 @@ class IndexerWorker:
             document.content
         )
 
+        embedding = (
+            self.embedding_model.embed(document.content)
+            if self.embedding_model is not None
+            else None
+        )
+
         self._index_document(
             document_id=event.document_id,
             tokens=tokens,
+            embedding=embedding,
         )
 
         return True
@@ -376,9 +404,16 @@ class IndexerWorker:
             document.content
         )
 
+        embedding = (
+            self.embedding_model.embed(document.content)
+            if self.embedding_model is not None
+            else None
+        )
+
         self._index_document(
             document_id=event.document_id,
             tokens=tokens,
+            embedding=embedding,
         )
 
         record_indexed_version(

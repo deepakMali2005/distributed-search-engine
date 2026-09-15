@@ -4,6 +4,7 @@ from services.indexer.shard_persistence import (
     JsonShardPersistence,
 )
 from services.indexer.shard_router import ShardRouter
+from services.semantic.models import Embedding
 
 
 class ShardManager:
@@ -67,6 +68,7 @@ class ShardManager:
         self,
         document_id: int,
         tokens: list[str],
+        embedding: Embedding | None = None,
     ) -> str:
         shard = self.get_shard_for_document(
             document_id
@@ -75,6 +77,7 @@ class ShardManager:
         shard.add_document(
             document_id,
             tokens,
+            embedding,
         )
 
         if self.persistence is not None:

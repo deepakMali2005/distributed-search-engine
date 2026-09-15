@@ -6,12 +6,17 @@ from services.indexer.shard_lifecycle import (
 )
 from services.search.engine import SearchEngine
 from services.search.models import SearchResult
+from services.semantic.models import Embedding
+from services.semantic.vector_index import VectorIndex
 
 
 @dataclass
 class Shard:
     shard_id: str
     index: InvertedIndex
+    vector_index: VectorIndex = field(
+        default_factory=VectorIndex
+    )
 
     _lifecycle_state: ShardLifecycleState = field(
         default=ShardLifecycleState.NEW,
@@ -44,17 +49,27 @@ class Shard:
         self,
         doc_id: int,
         tokens: list[str],
+        embedding: Embedding | None = None,
     ) -> None:
         self.index.add_document(
             doc_id=doc_id,
             tokens=tokens,
         )
 
+        if embedding is not None:
+            self.vector_index.add_document(
+                doc_id=doc_id,
+                embedding=embedding,
+            )
+
     def remove_document(
         self,
         doc_id: int,
     ) -> None:
         self.index.remove_document(
+            doc_id
+        )
+        self.vector_index.remove_document(
             doc_id
         )
 

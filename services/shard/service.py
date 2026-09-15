@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from services.indexer.index import InvertedIndex
 from services.indexer.shard import Shard
-from services.indexer.shard_persistence import JsonShardPersistence
+from services.indexer.shard_persistence import (
+    JsonShardPersistence,
+)
+from services.semantic.models import Embedding
 
 
 class PersistentShardService:
@@ -54,10 +57,12 @@ class PersistentShardService:
         self,
         document_id: int,
         tokens: list[str],
+        embedding: Embedding | None = None,
     ) -> None:
         self.shard.add_document(
             doc_id=document_id,
             tokens=tokens,
+            embedding=embedding,
         )
 
         self.persistence.save(

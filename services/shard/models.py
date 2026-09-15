@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 class IndexDocumentRequest(BaseModel):
     document_id: int = Field(gt=0)
     tokens: list[str]
+    embedding: list[float] | None = None
 
 
 class IndexDocumentResponse(BaseModel):
