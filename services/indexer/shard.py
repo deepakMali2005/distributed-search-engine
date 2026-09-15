@@ -3,7 +3,9 @@ from dataclasses import dataclass, field
 from services.indexer.index import InvertedIndex
 from services.indexer.shard_lifecycle import ShardLifecycleState
 from services.search.engine import SearchEngine
+from services.search.hybrid import HybridRanker
 from services.search.models import SearchResult
+from services.semantic.embedding import EmbeddingModel
 from services.semantic.models import Embedding, SemanticSearchResult
 from services.semantic.vector_index import VectorIndex
 
@@ -74,6 +76,27 @@ class Shard:
         return self.vector_index.search(
             query_embedding=query_embedding,
             top_k=limit,
+        )
+
+    def hybrid_search(
+        self,
+        query: str,
+        embedding_model: EmbeddingModel,
+        limit: int = 10,
+        hybrid_ranker: HybridRanker | None = None,
+    ) -> list[SearchResult]:
+        """Return hybrid lexical + semantic results from this shard."""
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero.")
+
+        return SearchEngine(
+            self.index,
+            vector_index=self.vector_index,
+            embedding_model=embedding_model,
+            hybrid_ranker=hybrid_ranker,
+        ).hybrid_search(
+            query=query,
+            limit=limit,
         )
 
     def search(self, query: str, limit: int = 10) -> list[SearchResult]:
