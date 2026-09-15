@@ -15,6 +15,8 @@ from services.shard.models import (
     IndexDocumentResponse,
     SearchResponse,
     SearchResultResponse,
+    SemanticSearchRequest,
+    SemanticSearchResponse,
 )
 from services.shard.service import PersistentShardService
 
@@ -34,14 +36,6 @@ def create_shard() -> Shard:
 def create_service(
     config: ShardServiceConfig | None = None,
 ) -> PersistentShardService:
-    """
-    Create a persistent shard service.
-
-    When no configuration is supplied, configuration is loaded
-    from environment variables. Tests can inject an explicit
-    configuration.
-    """
-
     if config is None:
         config = (
             ShardServiceConfig.from_environment()
@@ -57,27 +51,6 @@ def create_app(
     shard: Shard | PersistentShardService | None = None,
     service: PersistentShardService | None = None,
 ) -> FastAPI:
-    """
-    Create the shard HTTP service.
-
-    Supported forms:
-
-        create_app(shard)
-
-    for the original in-memory shard tests, and:
-
-        create_app(service)
-
-    or:
-
-        create_app(service=service)
-
-    for the persistent shard service.
-
-    When no object is supplied, a persistent shard service is
-    created from environment configuration.
-    """
-
     if (
         shard is not None
         and service is not None
@@ -181,6 +154,44 @@ def create_app(
         return DeleteDocumentResponse(
             shard_id=active_shard.shard_id,
             document_id=document_id,
+        )
+
+    @app.post(
+        "/semantic-search",
+        response_model=SemanticSearchResponse,
+    )
+    def semantic_search(
+        request: SemanticSearchRequest,
+        limit: int = Query(
+            10,
+            ge=1,
+            le=100,
+        ),
+    ) -> SemanticSearchResponse:
+        query_embedding = Embedding(
+            request.embedding
+        )
+
+        if service is not None:
+            results = service.semantic_search(
+                query_embedding=query_embedding,
+                limit=limit,
+            )
+        else:
+            results = active_shard.semantic_search(
+                query_embedding=query_embedding,
+                limit=limit,
+            )
+
+        return SemanticSearchResponse(
+            shard_id=active_shard.shard_id,
+            results=[
+                SearchResultResponse(
+                    doc_id=result.doc_id,
+                    score=result.score,
+                )
+                for result in results
+            ],
         )
 
     @app.get(

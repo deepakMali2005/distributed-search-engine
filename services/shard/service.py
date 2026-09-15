@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from services.indexer.index import InvertedIndex
 from services.indexer.shard import Shard
-from services.indexer.shard_persistence import (
-    JsonShardPersistence,
+from services.indexer.shard_persistence import JsonShardPersistence
+from services.semantic.models import (
+    Embedding,
+    SemanticSearchResult,
 )
-from services.semantic.models import Embedding
 
 
 class PersistentShardService:
@@ -79,6 +80,16 @@ class PersistentShardService:
 
         self.persistence.save(
             self.shard
+        )
+
+    def semantic_search(
+        self,
+        query_embedding: Embedding,
+        limit: int,
+    ) -> list[SemanticSearchResult]:
+        return self.shard.semantic_search(
+            query_embedding=query_embedding,
+            limit=limit,
         )
 
     def search(

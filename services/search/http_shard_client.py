@@ -6,6 +6,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from services.search.models import SearchResult
+from services.semantic.models import Embedding
 
 
 class ShardSearchError(RuntimeError):
@@ -34,8 +35,7 @@ class HttpShardSearchClient:
     SearchCoordinator.
 
     The coordinator does not know whether the shard is local
-    or remote. It only depends on the search(query, limit)
-    interface.
+    or remote. It only depends on the search interfaces.
     """
 
     def __init__(
@@ -188,4 +188,86 @@ class HttpShardSearchClient:
                 score=result["score"],
             )
             for result in results
+        ]
+
+    def semantic_search(
+        self,
+        query_embedding: Embedding,
+        limit: int,
+    ) -> list[SearchResult]:
+        """
+        Search the remote shard using a query embedding.
+        """
+        if limit <= 0:
+            raise ValueError(
+                "limit must be greater than zero."
+            )
+
+        payload = json.dumps(
+            {
+                "embedding": list(
+                    query_embedding.values
+                ),
+            }
+        ).encode("utf-8")
+
+        request = Request(
+            f"{self.base_url}/semantic-search"
+            f"?limit={limit}",
+            data=payload,
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        )
+
+        try:
+            with urlopen(
+                request,
+                timeout=self.timeout_seconds,
+            ) as response:
+                if response.status != 200:
+                    raise ShardSearchError(
+                        (
+                            f"Shard {self.shard_id} "
+                            f"returned HTTP {response.status}."
+                        ),
+                        retryable=response.status >= 500,
+                    )
+
+                payload_data = json.loads(
+                    response.read().decode("utf-8")
+                )
+
+        except HTTPError as exc:
+            raise ShardSearchError(
+                (
+                    f"Shard {self.shard_id} "
+                    f"returned HTTP {exc.code}."
+                ),
+                retryable=exc.code >= 500,
+            ) from exc
+
+        except URLError as exc:
+            raise ShardSearchError(
+                f"Shard {self.shard_id} is unavailable.",
+                retryable=True,
+            ) from exc
+
+        except TimeoutError as exc:
+            raise ShardSearchError(
+                f"Shard {self.shard_id} timed out.",
+                retryable=True,
+            ) from exc
+
+        return [
+            SearchResult(
+                doc_id=result["doc_id"],
+                score=result["score"],
+            )
+            for result in payload_data.get(
+                "results",
+                [],
+            )
         ]

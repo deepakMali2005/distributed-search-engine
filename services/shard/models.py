@@ -17,9 +17,18 @@ class DeleteDocumentResponse(BaseModel):
     document_id: int
 
 
+class SemanticSearchRequest(BaseModel):
+    embedding: list[float]
+
+
 class SearchResultResponse(BaseModel):
     doc_id: int
     score: float
+
+
+class SemanticSearchResponse(BaseModel):
+    shard_id: str
+    results: list[SearchResultResponse]
 
 
 class SearchResponse(BaseModel):

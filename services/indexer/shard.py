@@ -1,12 +1,10 @@
 from dataclasses import dataclass, field
 
 from services.indexer.index import InvertedIndex
-from services.indexer.shard_lifecycle import (
-    ShardLifecycleState,
-)
+from services.indexer.shard_lifecycle import ShardLifecycleState
 from services.search.engine import SearchEngine
 from services.search.models import SearchResult
-from services.semantic.models import Embedding
+from services.semantic.models import Embedding, SemanticSearchResult
 from services.semantic.vector_index import VectorIndex
 
 
@@ -14,9 +12,7 @@ from services.semantic.vector_index import VectorIndex
 class Shard:
     shard_id: str
     index: InvertedIndex
-    vector_index: VectorIndex = field(
-        default_factory=VectorIndex
-    )
+    vector_index: VectorIndex = field(default_factory=VectorIndex)
 
     _lifecycle_state: ShardLifecycleState = field(
         default=ShardLifecycleState.NEW,
@@ -25,24 +21,17 @@ class Shard:
 
     def __post_init__(self) -> None:
         if not self.shard_id:
-            raise ValueError(
-                "shard_id cannot be empty."
-            )
+            raise ValueError("shard_id cannot be empty.")
 
     @property
     def document_count(self) -> int:
         return self.index.document_count
 
     @property
-    def lifecycle_state(
-        self,
-    ) -> ShardLifecycleState:
+    def lifecycle_state(self) -> ShardLifecycleState:
         return self._lifecycle_state
 
-    def set_lifecycle_state(
-        self,
-        state: ShardLifecycleState,
-    ) -> None:
+    def set_lifecycle_state(self, state: ShardLifecycleState) -> None:
         self._lifecycle_state = state
 
     def add_document(
@@ -61,37 +50,37 @@ class Shard:
                 doc_id=doc_id,
                 embedding=embedding,
             )
+        else:
+            # Never retain a stale semantic representation after a
+            # lexical-only replacement of the same document.
+            self.vector_index.remove_document(doc_id)
 
-    def remove_document(
-        self,
-        doc_id: int,
-    ) -> None:
-        self.index.remove_document(
-            doc_id
-        )
-        self.vector_index.remove_document(
-            doc_id
-        )
+    def remove_document(self, doc_id: int) -> None:
+        self.index.remove_document(doc_id)
+        self.vector_index.remove_document(doc_id)
 
-    def contains_document(
-        self,
-        doc_id: int,
-    ) -> bool:
+    def contains_document(self, doc_id: int) -> bool:
         return doc_id in self.index.document_ids
 
-    def search(
+    def semantic_search(
         self,
-        query: str,
+        query_embedding: Embedding,
         limit: int = 10,
-    ) -> list[SearchResult]:
+    ) -> list[SemanticSearchResult]:
+        """Return the top semantic matches owned by this shard."""
         if limit <= 0:
-            raise ValueError(
-                "limit must be greater than zero."
-            )
+            raise ValueError("limit must be greater than zero.")
 
-        return SearchEngine(
-            self.index
-        ).search(
+        return self.vector_index.search(
+            query_embedding=query_embedding,
+            top_k=limit,
+        )
+
+    def search(self, query: str, limit: int = 10) -> list[SearchResult]:
+        if limit <= 0:
+            raise ValueError("limit must be greater than zero.")
+
+        return SearchEngine(self.index).search(
             query=query,
             limit=limit,
         )
