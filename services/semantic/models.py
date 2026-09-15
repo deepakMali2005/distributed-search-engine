@@ -22,12 +22,23 @@ class Embedding:
         normalized = tuple(float(value) for value in values)
 
         if not normalized:
-            raise ValueError("Embedding must contain at least one value.")
+            raise ValueError(
+                "Embedding must contain at least one value."
+            )
 
-        if not all(math.isfinite(value) for value in normalized):
-            raise ValueError("Embedding values must all be finite.")
+        if not all(
+            math.isfinite(value)
+            for value in normalized
+        ):
+            raise ValueError(
+                "Embedding values must all be finite."
+            )
 
-        object.__setattr__(self, "values", normalized)
+        object.__setattr__(
+            self,
+            "values",
+            normalized,
+        )
 
     @property
     def dimension(self) -> int:
@@ -42,3 +53,16 @@ class Embedding:
 
     def __getitem__(self, index: int) -> float:
         return self.values[index]
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticSearchResult:
+    """
+    Represents one result returned by semantic retrieval.
+
+    score is the cosine similarity between the query embedding
+    and the document embedding.
+    """
+
+    doc_id: int
+    score: float
