@@ -117,7 +117,7 @@ def test_created_event_fetches_analyzes_and_indexes_document():
         )
 
         analyzer.analyze.assert_called_once_with(
-            document.content
+            f"{document.title}\n{document.content}"
         )
 
         shard_manager.index_document.assert_called_once_with(
@@ -127,6 +127,7 @@ def test_created_event_fetches_analyzes_and_indexes_document():
                 "search",
                 "python",
             ],
+            embedding=None,
         )
 
         record_event.assert_not_called()
@@ -787,6 +788,7 @@ def test_current_version_is_indexed_and_version_is_recorded(
     shard_manager.index_document.assert_called_once_with(
         document_id=42,
         tokens=["search"],
+        embedding=None,
     )
 
     record_indexed.assert_called_once_with(
@@ -829,6 +831,7 @@ def test_duplicate_event_is_skipped_before_version_check(
     analyzer.analyze.assert_not_called()
 
     consumer.commit.assert_called_once_with(message)
+
 
 def test_remote_shard_indexing_uses_consistent_hash_routing():
     db = Mock(spec=Session)
@@ -890,6 +893,7 @@ def test_remote_shard_indexing_uses_consistent_hash_routing():
             "search",
             "python",
         ],
+        embedding=None,
     )
 
 

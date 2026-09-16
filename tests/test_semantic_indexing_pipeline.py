@@ -147,7 +147,7 @@ def test_worker_generates_embedding_before_local_indexing():
     )
 
     analyzer.analyze.assert_called_once_with(
-        document.content
+        f"{document.title}\n{document.content}"
     )
 
     embedding_model.embed.assert_called_once_with(

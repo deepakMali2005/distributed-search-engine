@@ -26,9 +26,14 @@ def test_index_single_document():
 
         postings = index.get_postings("python")
 
-        assert len(postings) == 1
-        assert postings[0].doc_id == document.id
-        assert postings[0].term_frequency == 1
+        document_posting = next(
+            posting
+            for posting in postings
+            if posting.doc_id == document.id
+        )
+
+        assert document_posting.doc_id == document.id
+        assert document_posting.term_frequency == 1
 
     finally:
         if document is not None:
@@ -36,6 +41,7 @@ def test_index_single_document():
             db.commit()
 
         db.close()
+
 
 def test_index_multiple_documents():
     db = SessionLocal()

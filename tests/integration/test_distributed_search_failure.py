@@ -11,7 +11,9 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from services.search.coordinator import SearchCoordinator
-from services.search.http_shard_client import HttpShardSearchClient
+from services.search.http_shard_client import (
+    HttpShardSearchClient,
+)
 
 
 def find_free_port() -> int:
@@ -55,7 +57,10 @@ def wait_for_health(
     port: int,
     timeout_seconds: float = 10.0,
 ) -> bool:
-    deadline = time.monotonic() + timeout_seconds
+    deadline = (
+        time.monotonic()
+        + timeout_seconds
+    )
 
     while time.monotonic() < deadline:
         try:
@@ -70,7 +75,9 @@ def wait_for_health(
             ) as response:
                 if response.status == 200:
                     payload = json.loads(
-                        response.read().decode("utf-8")
+                        response.read().decode(
+                            "utf-8"
+                        )
                     )
 
                     if payload.get("status") == "ok":
@@ -139,14 +146,17 @@ def test_search_returns_partial_results_when_one_shard_fails(
         find_free_port(),
     ]
 
-    processes: list[subprocess.Popen] = []
+    processes: list[subprocess.Popen | None] = []
 
     try:
         for index, port in enumerate(ports):
             process = start_shard(
                 shard_id=f"shard-{index}",
                 port=port,
-                data_path=tmp_path / f"shard-{index}",
+                data_path=(
+                    tmp_path
+                    / f"shard-{index}"
+                ),
             )
 
             processes.append(process)
@@ -186,7 +196,9 @@ def test_search_returns_partial_results_when_one_shard_fails(
         clients = [
             HttpShardSearchClient(
                 shard_id=f"shard-{index}",
-                base_url=f"http://127.0.0.1:{port}",
+                base_url=(
+                    f"http://127.0.0.1:{port}"
+                ),
                 timeout_seconds=1.0,
             )
             for index, port in enumerate(ports)
@@ -242,7 +254,9 @@ def test_search_retries_transient_shard_failure_and_recovers(
         find_free_port(),
     ]
 
-    processes: list[subprocess.Popen | None] = [
+    processes: list[
+        subprocess.Popen | None
+    ] = [
         None,
         None,
         None,
@@ -253,7 +267,10 @@ def test_search_retries_transient_shard_failure_and_recovers(
             processes[index] = start_shard(
                 shard_id=f"shard-{index}",
                 port=port,
-                data_path=tmp_path / f"shard-{index}",
+                data_path=(
+                    tmp_path
+                    / f"shard-{index}"
+                ),
             )
 
         for port in ports:
@@ -291,7 +308,9 @@ def test_search_retries_transient_shard_failure_and_recovers(
         clients = [
             HttpShardSearchClient(
                 shard_id=f"shard-{index}",
-                base_url=f"http://127.0.0.1:{port}",
+                base_url=(
+                    f"http://127.0.0.1:{port}"
+                ),
                 timeout_seconds=0.5,
             )
             for index, port in enumerate(ports)
@@ -309,12 +328,22 @@ def test_search_retries_transient_shard_failure_and_recovers(
         # Restart shard-1 while the coordinator is retrying.
         #
         def restart_shard() -> None:
-            time.sleep(0.3)
+            time.sleep(0.2)
 
-            processes[1] = start_shard(
+            process = start_shard(
                 shard_id="shard-1",
                 port=ports[1],
-                data_path=tmp_path / "shard-1",
+                data_path=(
+                    tmp_path
+                    / "shard-1"
+                ),
+            )
+
+            processes[1] = process
+
+            assert wait_for_health(
+                ports[1],
+                timeout_seconds=5.0,
             )
 
         restart_thread = threading.Thread(

@@ -1,7 +1,14 @@
 import uuid
 from datetime import datetime, timezone
 
-from confluent_kafka import Consumer, TopicPartition
+from confluent_kafka import (
+    Consumer,
+    TopicPartition,
+)
+from confluent_kafka.admin import (
+    AdminClient,
+    NewTopic,
+)
 
 from libs.common.document_events import (
     DocumentChangeEvent,
@@ -18,22 +25,81 @@ from services.search_api.database import SessionLocal
 from services.storage.storage import save_document
 
 
+def create_test_topic(
+    bootstrap_servers: str,
+    topic: str,
+) -> None:
+    """
+    Create a unique Kafka topic for this integration test.
+
+    The test uses a unique topic so that a running Docker
+    indexer-worker subscribed to the production document-events
+    topic cannot consume and record the test event first.
+    """
+
+    admin = AdminClient(
+        {
+            "bootstrap.servers": bootstrap_servers,
+        }
+    )
+
+    futures = admin.create_topics(
+        [
+            NewTopic(
+                topic=topic,
+                num_partitions=1,
+                replication_factor=1,
+            )
+        ]
+    )
+
+    try:
+        futures[topic].result(timeout=10)
+    except Exception as exc:
+        # The topic may already exist if Kafka retained it from
+        # an interrupted test run. A unique UUID makes this
+        # extremely unlikely, so only ignore the explicit
+        # "already exists" case.
+        if "TOPIC_ALREADY_EXISTS" not in str(exc):
+            raise
+
+
 def test_kafka_event_is_consumed_and_indexed():
-    config = KafkaConfig.from_environment()
+    environment_config = KafkaConfig.from_environment()
+
+    test_topic = (
+        f"document-events-worker-test-{uuid.uuid4().hex}"
+    )
+
+    config = KafkaConfig(
+        bootstrap_servers=environment_config.bootstrap_servers,
+        document_events_topic=test_topic,
+        indexer_group_id=(
+            f"worker-integration-{uuid.uuid4().hex}"
+        ),
+        document_events_dlq_topic=(
+            environment_config.document_events_dlq_topic
+        ),
+    )
+
+    create_test_topic(
+        bootstrap_servers=config.bootstrap_servers,
+        topic=config.document_events_topic,
+    )
 
     db = SessionLocal()
     document_id = None
     worker_consumer = None
-
-    consumer_group_id = (
-        f"worker-integration-{uuid.uuid4()}"
-    )
+    producer = None
 
     consumer = Consumer(
         {
-            "bootstrap.servers": config.bootstrap_servers,
-            "group.id": consumer_group_id,
+            "bootstrap.servers": (
+                config.bootstrap_servers
+            ),
+            "group.id": config.indexer_group_id,
             "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
         }
     )
 
@@ -76,6 +142,8 @@ def test_kafka_event_is_consumed_and_indexed():
         partitions = list(
             topic_metadata.partitions.keys()
         )
+
+        assert partitions
 
         offsets_before_publish = {}
 
@@ -178,6 +246,12 @@ def test_kafka_event_is_consumed_and_indexed():
 
     finally:
         consumer.close()
+
+        if producer is not None:
+            # DocumentEventProducer currently owns a synchronous
+            # producer and flushes after every publish. There is
+            # no separate close operation required.
+            producer = None
 
         if worker_consumer is not None:
             worker_consumer.close()
