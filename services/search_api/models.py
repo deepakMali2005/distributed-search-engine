@@ -22,6 +22,9 @@ class SearchResultResponse(BaseModel):
 
     doc_id: int
     score: float
+    title: str | None = None
+    url: str | None = None
+    snippet: str | None = None
 
 
 class SearchResponse(BaseModel):

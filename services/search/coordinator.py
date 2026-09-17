@@ -167,6 +167,25 @@ class SearchCoordinator:
             candidate_policy or DistributedCandidatePolicy()
         )
 
+        # A retrying shard needs enough coordinator wait time to complete
+        # its configured retry schedule. The per-request timeout remains
+        # owned by the shard client; this budget prevents the outer
+        # coordinator from declaring the shard timed out while a retry is
+        # still legitimately in progress.
+        retry_backoff_budget = sum(
+            self.retry_backoff_seconds * attempt
+            for attempt in range(1, self.max_retries + 1)
+        )
+
+        self._search_wait_timeout_seconds = (
+            self.shard_timeout_seconds
+            + retry_backoff_budget
+        )
+        self._semantic_search_wait_timeout_seconds = (
+            self.shard_timeout_seconds
+            + retry_backoff_budget
+        )
+
     @property
     def shard_count(self) -> int:
         """
@@ -626,7 +645,7 @@ class SearchCoordinator:
 
             done, not_done = wait(
                 futures,
-                timeout=self.shard_timeout_seconds,
+                timeout=self._search_wait_timeout_seconds,
             )
 
             outcomes: list[ShardSearchOutcome] = []
@@ -706,7 +725,7 @@ class SearchCoordinator:
 
             done, not_done = wait(
                 futures,
-                timeout=self.shard_timeout_seconds,
+                timeout=self._semantic_search_wait_timeout_seconds,
             )
 
             outcomes: list[ShardSearchOutcome] = []

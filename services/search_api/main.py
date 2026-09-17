@@ -7,6 +7,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from libs.models import Document
 from services.search.coordinator import SearchCoordinator
 from services.search.http_shard_client import HttpShardSearchClient
 from services.search_api.database import SessionLocal
@@ -145,27 +146,110 @@ def _get_search_coordinator() -> SearchCoordinator:
     return search_coordinator
 
 
+def _build_snippet(
+    content: str,
+    query: str,
+    *,
+    max_length: int = 240,
+) -> str:
+    """
+    Build a small deterministic excerpt from document content.
+
+    Prefer an excerpt around the first query-term occurrence. If no
+    query term occurs verbatim, fall back to the beginning of the
+    document.
+    """
+
+    normalized_content = " ".join(content.split())
+
+    if not normalized_content:
+        return ""
+
+    query_terms = [
+        term.lower()
+        for term in query.split()
+        if term.strip()
+    ]
+
+    lower_content = normalized_content.lower()
+
+    match_positions = [
+        lower_content.find(term)
+        for term in query_terms
+        if lower_content.find(term) >= 0
+    ]
+
+    if match_positions:
+        start = max(min(match_positions) - 80, 0)
+    else:
+        start = 0
+
+    snippet = normalized_content[
+        start:start + max_length
+    ]
+
+    if start > 0:
+        snippet = "..." + snippet
+
+    if start + max_length < len(normalized_content):
+        snippet = snippet.rstrip() + "..."
+
+    return snippet
+
+
 def _to_api_response(
     *,
     query: str,
     mode: SearchMode,
     response,
+    documents: dict[int, Document] | None = None,
 ) -> SearchResponse:
     """
-    Convert the internal coordinator response into the
-    public Search API response contract.
+    Convert the internal coordinator response into the public
+    Search API response contract.
+
+    Document metadata is optional so the existing API contract remains
+    compatible for callers that only need document IDs and scores.
     """
+
+    results = []
+
+    for result in response.results:
+        document = (
+            documents.get(result.doc_id)
+            if documents is not None
+            else None
+        )
+
+        results.append(
+            SearchResultResponse(
+                doc_id=result.doc_id,
+                score=result.score,
+                title=(
+                    document.title
+                    if document is not None
+                    else None
+                ),
+                url=(
+                    document.url
+                    if document is not None
+                    else None
+                ),
+                snippet=(
+                    _build_snippet(
+                        document.content,
+                        query,
+                    )
+                    if document is not None
+                    else None
+                ),
+            )
+        )
 
     return SearchResponse(
         query=query,
         mode=mode,
-        results=[
-            SearchResultResponse(
-                doc_id=result.doc_id,
-                score=result.score,
-            )
-            for result in response.results
-        ],
+        results=results,
         total_shards=response.total_shards,
         successful_shards=response.successful_shards,
         failed_shards=response.failed_shards,
@@ -196,6 +280,7 @@ def database_test(
 @app.get(
     "/search",
     response_model=SearchResponse,
+    response_model_exclude_none=True,
 )
 def search(
     q: str = Query(..., min_length=1),
@@ -207,6 +292,14 @@ def search(
         ge=1,
         le=100,
     ),
+    include_metadata: bool = Query(
+        False,
+        description=(
+            "Include crawled document title, URL, and snippet "
+            "for each result."
+        ),
+    ),
+    db: Session = Depends(get_db),
 ):
     """
     Execute distributed lexical, semantic, or hybrid search.
@@ -251,10 +344,28 @@ def search(
             detail=str(exc),
         ) from exc
 
+    documents = None
+
+    if include_metadata and response.results:
+        document_ids = [
+            result.doc_id
+            for result in response.results
+        ]
+
+        documents = {
+            document.id: document
+            for document in (
+                db.query(Document)
+                .filter(Document.id.in_(document_ids))
+                .all()
+            )
+        }
+
     return _to_api_response(
         query=q,
         mode=mode,
         response=response,
+        documents=documents,
     )
 
 

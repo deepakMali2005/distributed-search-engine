@@ -36,6 +36,7 @@ export async function GET(
     q: query,
     mode,
     limit,
+    include_metadata: "true",
   });
 
   try {

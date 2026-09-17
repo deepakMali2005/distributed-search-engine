@@ -171,9 +171,12 @@ class HttpShardSearchClient:
                 retryable=True,
             ) from exc
 
-        except TimeoutError as exc:
+        except (
+            TimeoutError,
+            OSError,
+        ) as exc:
             raise ShardSearchError(
-                f"Shard {self.shard_id} timed out.",
+                f"Shard {self.shard_id} is unavailable.",
                 retryable=True,
             ) from exc
 
@@ -255,9 +258,12 @@ class HttpShardSearchClient:
                 retryable=True,
             ) from exc
 
-        except TimeoutError as exc:
+        except (
+            TimeoutError,
+            OSError,
+        ) as exc:
             raise ShardSearchError(
-                f"Shard {self.shard_id} timed out.",
+                f"Shard {self.shard_id} is unavailable.",
                 retryable=True,
             ) from exc
 
