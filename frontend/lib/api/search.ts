@@ -1,7 +1,4 @@
-import type {
-  SearchMode,
-  SearchResponse,
-} from "@/types/search";
+import type { SearchMode, SearchResponse } from "@/types/search";
 
 interface SearchOptions {
   query: string;
@@ -20,22 +17,16 @@ export async function searchDocuments({
     limit: String(limit),
   });
 
-  const response = await fetch(
-    `/api/search?${params.toString()}`,
-    {
-      method: "GET",
-      cache: "no-store",
-    },
-  );
+  const response = await fetch(`/api/search?${params.toString()}`, {
+    method: "GET",
+    cache: "no-store",
+  });
 
-  const body = await response
-    .json()
-    .catch(() => null);
+  const body = await response.json().catch(() => null);
 
   if (!response.ok) {
     const detail =
-      body &&
-      typeof body.detail === "string"
+      body && typeof body.detail === "string"
         ? body.detail
         : "Search service is currently unavailable.";
 

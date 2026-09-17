@@ -5,14 +5,12 @@ interface SearchResultsProps {
   results: SearchResult[];
 }
 
-export function SearchResults({
-  results,
-}: SearchResultsProps) {
+export function SearchResults({ results }: SearchResultsProps) {
   return (
-    <div className="space-y-9">
-      {results.map((result) => (
+    <div className="space-y-7">
+      {results.map((result, index) => (
         <SearchResultCard
-          key={result.doc_id}
+          key={`${result.doc_id}-${index}`}
           result={result}
         />
       ))}

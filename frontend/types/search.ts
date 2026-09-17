@@ -1,7 +1,4 @@
-export type SearchMode =
-  | "lexical"
-  | "semantic"
-  | "hybrid";
+export type SearchMode = "lexical" | "semantic" | "hybrid";
 
 export interface SearchResult {
   doc_id: number;

@@ -32,7 +32,11 @@ export function SearchModeSelector({
   disabled = false,
 }: SearchModeSelectorProps) {
   return (
-    <div className="inline-flex rounded-full border border-zinc-200 bg-white p-1 shadow-sm">
+    <div
+      role="tablist"
+      aria-label="Search mode"
+      className="flex items-center gap-1"
+    >
       {modes.map((mode) => {
         const selected = value === mode.value;
 
@@ -40,16 +44,21 @@ export function SearchModeSelector({
           <button
             key={mode.value}
             type="button"
+            role="tab"
+            aria-selected={selected}
             disabled={disabled}
-            aria-pressed={selected}
             onClick={() => onChange(mode.value)}
-            className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
+            className={`relative px-3 py-2 text-[13px] font-medium transition-colors duration-150 ${
               selected
-                ? "bg-zinc-900 text-white"
-                : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"
-            } disabled:cursor-not-allowed disabled:opacity-50`}
+                ? "text-[#1a73e8]"
+                : "text-[#5f6368] hover:text-[#202124]"
+            } disabled:pointer-events-none disabled:opacity-50`}
           >
             {mode.label}
+
+            {selected && (
+              <span className="absolute inset-x-2 -bottom-[1px] h-[2px] rounded-full bg-[#1a73e8]" />
+            )}
           </button>
         );
       })}
