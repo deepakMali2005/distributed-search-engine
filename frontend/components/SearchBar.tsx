@@ -34,18 +34,18 @@ export function SearchBar({
     <div
       className={`w-full ${
         compact
-          ? "max-w-[760px]"
-          : "max-w-[720px]"
+          ? "max-w-190"
+          : "max-w-180"
       }`}
     >
       <form
         onSubmit={handleSubmit}
         role="search"
       >
-        <div className="group flex h-[56px] items-center rounded-[19px] border border-[#dadce0] bg-white px-4 shadow-[0_2px_12px_rgba(32,33,36,0.07)] transition-all duration-200 hover:border-[#c8cdd2] hover:shadow-[0_5px_18px_rgba(32,33,36,0.10)] focus-within:border-[#a9bce3] focus-within:shadow-[0_5px_22px_rgba(32,33,36,0.12)] sm:px-5">
+        <div className="group flex h-14 items-center rounded-[19px] border border-[#dadce0] bg-white px-4 shadow-[0_2px_12px_rgba(32,33,36,0.07)] transition-all duration-200 hover:border-[#c8cdd2] hover:shadow-[0_5px_18px_rgba(32,33,36,0.10)] focus-within:border-[#a9bce3] focus-within:shadow-[0_5px_22px_rgba(32,33,36,0.12)] sm:px-5">
           <svg
             aria-hidden="true"
-            className="mr-3 h-[19px] w-[19px] shrink-0 text-[#80868b]"
+            className="mr-3 h-4.75 w-4.75 shrink-0 text-[#80868b]"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
