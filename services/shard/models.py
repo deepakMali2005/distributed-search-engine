@@ -7,9 +7,27 @@ class IndexDocumentRequest(BaseModel):
     embedding: list[float] | None = None
 
 
+class IndexDocumentBatchItem(BaseModel):
+    document_id: int = Field(gt=0)
+    tokens: list[str]
+    embedding: list[float] | None = None
+
+
+class IndexDocumentBatchRequest(BaseModel):
+    documents: list[IndexDocumentBatchItem] = Field(
+        min_length=1,
+        max_length=500,
+    )
+
+
 class IndexDocumentResponse(BaseModel):
     shard_id: str
     document_id: int
+
+
+class IndexDocumentBatchResponse(BaseModel):
+    shard_id: str
+    document_count: int
 
 
 class DeleteDocumentResponse(BaseModel):

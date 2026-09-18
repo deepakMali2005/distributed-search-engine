@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 from services.indexer.index import InvertedIndex
 from services.indexer.shard import Shard
 from services.indexer.shard_persistence import JsonShardPersistence
@@ -24,6 +26,7 @@ class PersistentShardService:
     ) -> None:
         self.shard = shard
         self.persistence = persistence
+        self._mutation_lock = threading.RLock()
 
     @classmethod
     def create(
@@ -60,27 +63,87 @@ class PersistentShardService:
         tokens: list[str],
         embedding: Embedding | None = None,
     ) -> None:
-        self.shard.add_document(
-            doc_id=document_id,
-            tokens=tokens,
-            embedding=embedding,
-        )
+        """
+        Index one document and persist the new shard generation.
+        """
 
-        self.persistence.save(
-            self.shard
-        )
+        with self._mutation_lock:
+            self.shard.add_document(
+                doc_id=document_id,
+                tokens=tokens,
+                embedding=embedding,
+            )
+
+            self.persistence.save(
+                self.shard
+            )
+
+    def index_documents(
+        self,
+        documents: list[
+            tuple[int, list[str], Embedding | None]
+        ],
+    ) -> None:
+        """
+        Index multiple already-analyzed documents and publish one
+        durable shard generation for the complete batch.
+
+        This method is used by bootstrap/reconciliation.
+
+        The normal Kafka worker continues to use index_document(),
+        preserving the existing event-driven runtime behavior.
+        """
+
+        if not documents:
+            raise ValueError(
+                "documents cannot be empty."
+            )
+
+        document_ids = [
+            document_id
+            for document_id, _, _ in documents
+        ]
+
+        if len(document_ids) != len(
+            set(document_ids)
+        ):
+            raise ValueError(
+                "documents cannot contain duplicate document IDs."
+            )
+
+        with self._mutation_lock:
+            for (
+                document_id,
+                tokens,
+                embedding,
+            ) in documents:
+                self.shard.add_document(
+                    doc_id=document_id,
+                    tokens=tokens,
+                    embedding=embedding,
+                )
+
+            # One persistence publication for the whole batch.
+            self.persistence.save(
+                self.shard
+            )
 
     def delete_document(
         self,
         document_id: int,
     ) -> None:
-        self.shard.remove_document(
-            document_id
-        )
+        """
+        Delete a document and persist the updated shard.
+        """
 
-        self.persistence.save(
-            self.shard
-        )
+        with self._mutation_lock:
+            self.shard.remove_document(
+                document_id
+            )
+
+            self.persistence.save(
+                self.shard
+            )
 
     def semantic_search(
         self,

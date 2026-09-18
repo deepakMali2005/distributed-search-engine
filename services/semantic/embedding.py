@@ -19,8 +19,11 @@ class EmbeddingModel(Protocol):
         """Return the fixed vector dimension produced by the model."""
         ...
 
-    def embed(self, text: str) -> Embedding:
-        """Convert text into an embedding in the model's vector space."""
+    def embed(
+        self,
+        text: str,
+    ) -> Embedding:
+        """Convert a single text into an embedding."""
         ...
 
 
@@ -29,11 +32,13 @@ class SentenceTransformerEmbeddingModel:
     EmbeddingModel implementation backed by Sentence Transformers.
 
     The underlying model is loaded once when this class is created.
-    Both document and query text should use the same instance/model
+    Both document and query text should use the same model/model
     configuration.
     """
 
-    DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+    DEFAULT_MODEL_NAME = (
+        "sentence-transformers/all-MiniLM-L6-v2"
+    )
 
     def __init__(
         self,
@@ -46,7 +51,9 @@ class SentenceTransformerEmbeddingModel:
             )
 
         try:
-            from sentence_transformers import SentenceTransformer
+            from sentence_transformers import (
+                SentenceTransformer,
+            )
         except ImportError as exc:
             raise RuntimeError(
                 "sentence-transformers is required to use "
@@ -66,26 +73,91 @@ class SentenceTransformerEmbeddingModel:
             **model_kwargs,
         )
 
-        dimension = self._model.get_sentence_embedding_dimension()
+        dimension = (
+            self._model
+            .get_sentence_embedding_dimension()
+        )
 
         if dimension is None or dimension <= 0:
             raise ValueError(
-                "Embedding model must expose a positive embedding dimension."
+                "Embedding model must expose a "
+                "positive embedding dimension."
             )
 
-        self._dimension = int(dimension)
+        self._dimension = int(
+            dimension
+        )
+
+    def embed_batch(
+        self,
+        texts: list[str],
+    ) -> list[Embedding]:
+        """
+        Convert multiple texts into normalized embeddings
+        using one Sentence Transformer model call.
+        """
+
+        if not texts:
+            return []
+
+        for text in texts:
+            if not isinstance(text, str):
+                raise TypeError(
+                    "texts must contain only strings."
+                )
+
+            if not text.strip():
+                raise ValueError(
+                    "texts must not contain empty strings."
+                )
+
+        vectors = self._model.encode(
+            texts,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+
+        embeddings = [
+            Embedding(
+                vector.tolist()
+            )
+            for vector in vectors
+        ]
+
+        if len(embeddings) != len(
+            texts
+        ):
+            raise ValueError(
+                "Embedding model returned an "
+                "unexpected number of vectors."
+            )
+
+        if any(
+            embedding.dimension
+            != self._dimension
+            for embedding in embeddings
+        ):
+            raise ValueError(
+                "Embedding model returned an "
+                "unexpected dimension."
+            )
+
+        return embeddings
 
     @property
     def dimension(self) -> int:
         """Return the embedding dimension produced by the model."""
         return self._dimension
 
-    def embed(self, text: str) -> Embedding:
+    def embed(
+        self,
+        text: str,
+    ) -> Embedding:
         """
-        Convert text into a normalized embedding.
+        Convert a single text into a normalized embedding.
 
         Normalization makes the generated vectors unit length,
-        while cosine_similarity remains the canonical similarity
+        while cosine similarity remains the canonical similarity
         operation used by the search engine.
         """
 
@@ -105,12 +177,18 @@ class SentenceTransformerEmbeddingModel:
             normalize_embeddings=True,
         )
 
-        embedding = Embedding(vector.tolist())
+        embedding = Embedding(
+            vector.tolist()
+        )
 
-        if embedding.dimension != self._dimension:
+        if embedding.dimension != (
+            self._dimension
+        ):
             raise ValueError(
-                "Embedding model returned an unexpected dimension: "
-                f"{embedding.dimension} != {self._dimension}."
+                "Embedding model returned an "
+                "unexpected dimension: "
+                f"{embedding.dimension} != "
+                f"{self._dimension}."
             )
 
         return embedding

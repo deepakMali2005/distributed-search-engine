@@ -1,17 +1,14 @@
 from __future__ import annotations
 
 import os
-import time
 
 from sqlalchemy.orm import Session
 
-from libs.common.document_events import (
-    DocumentChangeEvent,
-    DocumentEventType,
-)
-from services.events.producer import DocumentEventProducer
+from services.indexer.analyzer import TextAnalyzer
 from services.indexer.remote_shard_client import HttpShardIndexClient
 from services.indexer.shard_router import ShardRouter
+from services.semantic.embedding import SentenceTransformerEmbeddingModel
+from services.semantic.models import Embedding
 from services.storage.storage import get_all_documents
 
 
@@ -26,51 +23,71 @@ class IndexBootstrapper:
     """
     Reconcile canonical PostgreSQL documents with distributed shards.
 
-    PostgreSQL remains the canonical document store.
+    Bootstrap is a specialized bulk-repair path. Normal document changes
+    continue to use:
 
-    The bootstrapper does not perform indexing itself. It only publishes
-    document events for documents that are missing from their owning shard.
+        PostgreSQL -> Kafka -> IndexerWorker -> shard
 
-    The normal Kafka indexer worker performs the actual lexical and
-    semantic indexing.
+    Bootstrap does not publish thousands of one-document Kafka repair
+    events. Instead, it analyzes, embeds, and indexes bounded batches
+    directly through the shard bulk API.
+
+    This dramatically reduces:
+        - embedding model calls
+        - HTTP requests
+        - shard persistence publications
+        - bootstrap startup time
     """
 
     def __init__(
         self,
         db: Session,
-        event_producer: DocumentEventProducer,
         shard_router: ShardRouter,
         shard_clients: dict[str, HttpShardIndexClient],
         *,
-        wait_timeout_seconds: float = 120.0,
-        poll_interval_seconds: float = 1.0,
+        embedding_model: SentenceTransformerEmbeddingModel | None = None,
+        analyzer: TextAnalyzer | None = None,
+        batch_size: int = 100,
     ) -> None:
         if not shard_clients:
             raise ValueError(
                 "shard_clients cannot be empty."
             )
 
-        if wait_timeout_seconds < 0:
+        if batch_size <= 0:
             raise ValueError(
-                "wait_timeout_seconds must be >= 0."
-            )
-
-        if poll_interval_seconds <= 0:
-            raise ValueError(
-                "poll_interval_seconds must be > 0."
+                "batch_size must be greater than zero."
             )
 
         self.db = db
-        self.event_producer = event_producer
         self.shard_router = shard_router
         self.shard_clients = shard_clients
-        self.wait_timeout_seconds = wait_timeout_seconds
-        self.poll_interval_seconds = poll_interval_seconds
+        self.analyzer = analyzer or TextAnalyzer()
+        self.embedding_model = embedding_model
+        self.batch_size = batch_size
+
+    @staticmethod
+    def _build_lexical_text(
+        title: str | None,
+        content: str,
+    ) -> str:
+        """
+        Build the same lexical text representation used by the
+        normal Kafka indexer.
+        """
+
+        title = (title or "").strip()
+        content = (content or "").strip()
+
+        if title and content:
+            return f"{title}\n{content}"
+
+        return title or content
 
     def find_missing_documents(self) -> list[int]:
         """
-        Return document IDs that are not currently present on their
-        owning shards.
+        Return document IDs that are not currently present on
+        their owning shards.
         """
 
         missing_document_ids: list[int] = []
@@ -80,15 +97,21 @@ class IndexBootstrapper:
                 document.id
             )
 
-            client = self.shard_clients.get(shard_id)
+            client = self.shard_clients.get(
+                shard_id
+            )
 
             if client is None:
                 raise RuntimeError(
                     f"No shard client configured for {shard_id}"
                 )
 
-            if not client.contains_document(document.id):
-                missing_document_ids.append(document.id)
+            if not client.contains_document(
+                document.id
+            ):
+                missing_document_ids.append(
+                    document.id
+                )
 
         return missing_document_ids
 
@@ -97,97 +120,154 @@ class IndexBootstrapper:
         document_ids: list[int],
     ) -> int:
         """
-        Publish repair events for the supplied documents.
+        Bulk-index the supplied PostgreSQL documents.
 
-        Returns the number of events published.
+        Documents are:
+            1. grouped by owning shard
+            2. analyzed in bounded batches
+            3. embedded in batches
+            4. sent to the shard using one bulk HTTP request
+            5. persisted once per batch
+
+        Documents with empty content are indexed lexically but do not
+        receive a semantic embedding. This prevents invalid empty strings
+        from reaching the sentence-transformer model.
+
+        Returns the number of successfully indexed documents.
         """
 
         if not document_ids:
             return 0
 
-        documents = {
+        documents_by_id = {
             document.id: document
             for document in get_all_documents(self.db)
         }
 
-        published = 0
+        grouped_documents: dict[str, list] = {
+            shard_id: []
+            for shard_id in self.shard_clients
+        }
 
         for document_id in document_ids:
-            document = documents.get(document_id)
+            document = documents_by_id.get(
+                document_id
+            )
 
             if document is None:
                 raise RuntimeError(
                     f"Document {document_id} does not exist in PostgreSQL."
                 )
 
-            event_type = (
-                DocumentEventType.CREATED
-                if document.version == 1
-                else DocumentEventType.UPDATED
+            shard_id = self.shard_router.get_shard_id(
+                document_id
             )
 
-            event = DocumentChangeEvent.create(
-                event_type=event_type,
-                document_id=document.id,
-                url=document.url,
-                content_hash=document.content_hash,
-                event_version=document.version,
-                metadata={
-                    "bootstrap": True,
-                },
-            )
-
-            self.event_producer.publish(event)
-            published += 1
-
-        return published
-
-    def wait_for_indexing(
-        self,
-        document_ids: list[int],
-    ) -> None:
-        """
-        Wait until every requested document is present on its owning shard.
-        """
-
-        if not document_ids:
-            return
-
-        deadline = (
-            time.monotonic()
-            + self.wait_timeout_seconds
-        )
-
-        pending = set(document_ids)
-
-        while pending:
-            for document_id in list(pending):
-                shard_id = self.shard_router.get_shard_id(
-                    document_id
+            if shard_id not in self.shard_clients:
+                raise RuntimeError(
+                    f"No shard client configured for {shard_id}"
                 )
 
-                client = self.shard_clients.get(shard_id)
+            grouped_documents[shard_id].append(
+                document
+            )
 
-                if client is None:
-                    raise RuntimeError(
-                        f"No shard client configured for {shard_id}"
+        indexed_count = 0
+
+        for shard_id, documents in grouped_documents.items():
+            if not documents:
+                continue
+
+            client = self.shard_clients[
+                shard_id
+            ]
+
+            for start in range(
+                0,
+                len(documents),
+                self.batch_size,
+            ):
+                batch = documents[
+                    start : start + self.batch_size
+                ]
+
+                token_lists = [
+                    self.analyzer.analyze(
+                        self._build_lexical_text(
+                            title=document.title,
+                            content=document.content,
+                        )
                     )
+                    for document in batch
+                ]
 
-                if client.contains_document(document_id):
-                    pending.remove(document_id)
+                embeddings: list[
+                    Embedding | None
+                ] = [None] * len(batch)
 
-            if not pending:
-                return
+                if self.embedding_model is not None:
+                    non_empty_documents = [
+                        (
+                            index,
+                            document,
+                        )
+                        for index, document in enumerate(batch)
+                        if (document.content or "").strip()
+                    ]
 
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    "Timed out waiting for bootstrap indexing of "
-                    f"documents: {sorted(pending)}"
+                    if non_empty_documents:
+                        non_empty_embeddings = (
+                            self.embedding_model.embed_batch(
+                                [
+                                    document.content
+                                    for _, document in non_empty_documents
+                                ]
+                            )
+                        )
+
+                        if len(non_empty_embeddings) != len(
+                            non_empty_documents
+                        ):
+                            raise RuntimeError(
+                                "Embedding model returned an unexpected "
+                                "number of embeddings."
+                            )
+
+                        for (
+                            (document_index, _),
+                            embedding,
+                        ) in zip(
+                            non_empty_documents,
+                            non_empty_embeddings,
+                        ):
+                            embeddings[document_index] = embedding
+
+                client.index_documents(
+                    [
+                        (
+                            document.id,
+                            tokens,
+                            embedding,
+                        )
+                        for document, tokens, embedding in zip(
+                            batch,
+                            token_lists,
+                            embeddings,
+                        )
+                    ]
                 )
 
-            time.sleep(
-                self.poll_interval_seconds
-            )
+                indexed_count += len(batch)
+
+                print(
+                    "Bootstrap indexed "
+                    f"{indexed_count}/{len(document_ids)} "
+                    "documents "
+                    f"(shard={shard_id}, "
+                    f"batch={len(batch)})."
+                )
+
+        return indexed_count
 
 
 def _load_shard_urls() -> dict[str, str]:
@@ -196,7 +276,9 @@ def _load_shard_urls() -> dict[str, str]:
     )
 
     if not raw:
-        return dict(DEFAULT_SHARD_URLS)
+        return dict(
+            DEFAULT_SHARD_URLS
+        )
 
     shard_urls: dict[str, str] = {}
 
@@ -208,7 +290,8 @@ def _load_shard_urls() -> dict[str, str]:
 
         if "=" not in item:
             raise ValueError(
-                "INDEXER_SHARD_URLS entries must use shard-id=url format."
+                "INDEXER_SHARD_URLS entries must use "
+                "shard-id=url format."
             )
 
         shard_id, url = item.split(
@@ -251,29 +334,35 @@ def main() -> None:
             shard_ids=list(shard_urls)
         )
 
+        shard_timeout = float(
+            os.getenv(
+                "INDEX_BOOTSTRAP_SHARD_TIMEOUT_SECONDS",
+                "60",
+            )
+        )
+
         clients = {
             shard_id: HttpShardIndexClient(
                 shard_id=shard_id,
                 base_url=url,
+                timeout_seconds=shard_timeout,
             )
             for shard_id, url in shard_urls.items()
         }
 
+        embedding_model = (
+            SentenceTransformerEmbeddingModel()
+        )
+
         bootstrapper = IndexBootstrapper(
             db=db,
-            event_producer=DocumentEventProducer(),
             shard_router=router,
             shard_clients=clients,
-            wait_timeout_seconds=float(
+            embedding_model=embedding_model,
+            batch_size=int(
                 os.getenv(
-                    "INDEX_BOOTSTRAP_TIMEOUT_SECONDS",
-                    "120",
-                )
-            ),
-            poll_interval_seconds=float(
-                os.getenv(
-                    "INDEX_BOOTSTRAP_POLL_INTERVAL_SECONDS",
-                    "1",
+                    "INDEX_BOOTSTRAP_BATCH_SIZE",
+                    "100",
                 )
             ),
         )
@@ -285,22 +374,27 @@ def main() -> None:
         if not missing_document_ids:
             print(
                 "Index bootstrap completed: "
-                "0 repair event(s) required."
+                "0 documents required repair."
             )
             return
 
-        published = bootstrapper.bootstrap(
+        indexed = bootstrapper.bootstrap(
             missing_document_ids
         )
 
-        bootstrapper.wait_for_indexing(
+        if indexed != len(
             missing_document_ids
-        )
+        ):
+            raise RuntimeError(
+                "Bootstrap did not index every "
+                "missing document: "
+                f"indexed={indexed}, "
+                f"missing={len(missing_document_ids)}"
+            )
 
         print(
             "Index bootstrap completed: "
-            f"{published} repair event(s) published "
-            "and verified."
+            f"{indexed} document(s) repaired."
         )
 
     finally:

@@ -12,6 +12,8 @@ from services.shard.models import (
     DeleteDocumentResponse,
     DocumentPresenceResponse,
     HealthResponse,
+    IndexDocumentBatchRequest,
+    IndexDocumentBatchResponse,
     IndexDocumentRequest,
     IndexDocumentResponse,
     SearchResponse,
@@ -126,6 +128,71 @@ def create_app(
             document_id=request.document_id,
         )
 
+    @app.post(
+        "/documents/bulk",
+        response_model=IndexDocumentBatchResponse,
+    )
+    def index_documents_bulk(
+        request: IndexDocumentBatchRequest,
+    ) -> IndexDocumentBatchResponse:
+        """
+        Bulk-index a bounded batch of already-analyzed documents.
+
+        This endpoint exists primarily for bootstrap/reconciliation.
+        One request results in one shard persistence publication.
+        """
+
+        documents = [
+            (
+                item.document_id,
+                item.tokens,
+                (
+                    Embedding(item.embedding)
+                    if item.embedding is not None
+                    else None
+                ),
+            )
+            for item in request.documents
+        ]
+
+        document_ids = [
+            document_id
+            for document_id, _, _ in documents
+        ]
+
+        if len(document_ids) != len(
+            set(document_ids)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Bulk request cannot contain "
+                    "duplicate document IDs."
+                ),
+            )
+
+        if service is not None:
+            service.index_documents(
+                documents
+            )
+
+        else:
+            for (
+                document_id,
+                tokens,
+                embedding,
+            ) in documents:
+                active_shard.add_document(
+                    doc_id=document_id,
+                    tokens=tokens,
+                    embedding=embedding,
+                )
+
+        return IndexDocumentBatchResponse(
+            shard_id=active_shard.shard_id,
+            document_count=len(documents),
+        )
+
     @app.delete(
         "/documents/{document_id}",
         response_model=DeleteDocumentResponse,
@@ -224,9 +291,9 @@ def create_app(
         )
 
     @app.get(
-    "/documents/{document_id}",
-    response_model=DocumentPresenceResponse,
-)
+        "/documents/{document_id}",
+        response_model=DocumentPresenceResponse,
+    )
     def document_presence(
         document_id: int,
     ) -> DocumentPresenceResponse:

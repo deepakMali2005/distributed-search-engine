@@ -27,15 +27,18 @@ class ShardIndexError(RuntimeError):
 
 class HttpShardIndexClient:
     """
-    HTTP client used by indexer workers to mutate a remote shard.
+    HTTP client used by indexer workers and bootstrap to mutate
+    a remote shard.
 
     The worker is responsible for:
         - document retrieval
         - text analysis
+        - embedding generation
         - consistent-hash routing
 
     The shard service is responsible for:
         - maintaining its local inverted index
+        - maintaining its vector index
         - persistence
         - shard lifecycle
     """
@@ -73,7 +76,7 @@ class HttpShardIndexClient:
         embedding: Embedding | None = None,
     ) -> None:
         """
-        Index an already-analyzed document on the remote shard.
+        Index one already-analyzed document on the remote shard.
         """
 
         payload_data = {
@@ -134,6 +137,108 @@ class HttpShardIndexClient:
         ) as exc:
             raise ShardIndexError(
                 f"Shard {self.shard_id} is unavailable.",
+                retryable=True,
+            ) from exc
+
+    def index_documents(
+        self,
+        documents: list[
+            tuple[int, list[str], Embedding | None]
+        ],
+    ) -> None:
+        """
+        Index a bounded batch using one HTTP request.
+
+        The shard persists the complete batch as one new immutable
+        generation instead of persisting every document individually.
+        """
+
+        if not documents:
+            raise ValueError(
+                "documents cannot be empty."
+            )
+
+        document_ids = [
+            document_id
+            for document_id, _, _ in documents
+        ]
+
+        if len(document_ids) != len(
+            set(document_ids)
+        ):
+            raise ValueError(
+                "documents cannot contain duplicate document IDs."
+            )
+
+        payload = json.dumps(
+            {
+                "documents": [
+                    {
+                        "document_id": document_id,
+                        "tokens": tokens,
+                        **(
+                            {
+                                "embedding": list(
+                                    embedding.values
+                                )
+                            }
+                            if embedding is not None
+                            else {}
+                        ),
+                    }
+                    for document_id, tokens, embedding
+                    in documents
+                ]
+            }
+        ).encode("utf-8")
+
+        request = Request(
+            f"{self.base_url}/documents/bulk",
+            data=payload,
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+        )
+
+        try:
+            with urlopen(
+                request,
+                timeout=self.timeout_seconds,
+            ) as response:
+                if response.status != 200:
+                    raise ShardIndexError(
+                        (
+                            f"Shard {self.shard_id} "
+                            f"returned HTTP {response.status} "
+                            "while bulk indexing."
+                        ),
+                        retryable=response.status >= 500,
+                    )
+
+                response.read()
+
+        except HTTPError as exc:
+            raise ShardIndexError(
+                (
+                    f"Shard {self.shard_id} "
+                    f"returned HTTP {exc.code} "
+                    "while bulk indexing."
+                ),
+                retryable=exc.code >= 500,
+            ) from exc
+
+        except (
+            URLError,
+            TimeoutError,
+            OSError,
+        ) as exc:
+            raise ShardIndexError(
+                (
+                    f"Shard {self.shard_id} "
+                    "is unavailable during bulk indexing."
+                ),
                 retryable=True,
             ) from exc
 
