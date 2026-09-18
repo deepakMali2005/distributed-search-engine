@@ -13,8 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Distributed Search",
-  description: "A distributed hybrid search engine.",
+  title: "STRATA — Distributed Hybrid Search",
+  description:
+    "STRATA is a distributed hybrid search engine combining lexical and semantic search.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

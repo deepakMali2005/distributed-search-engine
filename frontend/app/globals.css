@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
+  --background: #fbfcfe;
   --foreground: #202124;
 }
 
@@ -12,6 +12,7 @@
 html {
   min-width: 320px;
   background: var(--background);
+  scroll-behavior: smooth;
 }
 
 body {
@@ -33,8 +34,13 @@ a {
   -webkit-tap-highlight-color: transparent;
 }
 
+a {
+  text-decoration: none;
+}
+
 ::selection {
-  background: #d2e3fc;
+  background: #dbe7fb;
+  color: #202124;
 }
 
 @keyframes search-progress {
@@ -53,4 +59,18 @@ a {
 
 .animate-search-progress {
   animation: search-progress 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

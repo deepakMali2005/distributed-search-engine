@@ -5,18 +5,22 @@ import type { SearchMode } from "@/types/search";
 const modes: Array<{
   value: SearchMode;
   label: string;
+  description: string;
 }> = [
   {
-    value: "lexical",
-    label: "Lexical",
+    value: "hybrid",
+    label: "Hybrid",
+    description: "Lexical + semantic",
   },
   {
     value: "semantic",
     label: "Semantic",
+    description: "Meaning-based",
   },
   {
-    value: "hybrid",
-    label: "Hybrid",
+    value: "lexical",
+    label: "Lexical",
+    description: "Keyword-based",
   },
 ];
 
@@ -35,10 +39,11 @@ export function SearchModeSelector({
     <div
       role="tablist"
       aria-label="Search mode"
-      className="flex items-center gap-1"
+      className="inline-flex items-center rounded-full border border-[#e3e6e8] bg-[#f5f6f7] p-1"
     >
       {modes.map((mode) => {
-        const selected = value === mode.value;
+        const selected =
+          value === mode.value;
 
         return (
           <button
@@ -46,18 +51,30 @@ export function SearchModeSelector({
             type="button"
             role="tab"
             aria-selected={selected}
+            aria-label={`${mode.label}: ${mode.description}`}
+            title={mode.description}
             disabled={disabled}
-            onClick={() => onChange(mode.value)}
-            className={`relative px-3 py-2 text-[13px] font-medium transition-colors duration-150 ${
+            onClick={() =>
+              onChange(mode.value)
+            }
+            className={`relative rounded-full px-3.5 py-1.5 text-[12px] font-medium transition-all duration-150 sm:px-4 ${
               selected
-                ? "text-[#1a73e8]"
-                : "text-[#5f6368] hover:text-[#202124]"
+                ? "bg-white text-[#202124] shadow-[0_1px_4px_rgba(32,33,36,0.11)]"
+                : "text-[#70757a] hover:text-[#202124]"
             } disabled:pointer-events-none disabled:opacity-50`}
           >
             {mode.label}
 
             {selected && (
-              <span className="absolute inset-x-2 -bottom-[1px] h-[2px] rounded-full bg-[#1a73e8]" />
+              <span
+                className={`absolute bottom-0.5 left-1/2 h-0.5 w-3 -translate-x-1/2 rounded-full ${
+                  mode.value === "hybrid"
+                    ? "bg-[#34a853]"
+                    : mode.value === "semantic"
+                      ? "bg-[#7e57c2]"
+                      : "bg-[#1a73e8]"
+                }`}
+              />
             )}
           </button>
         );
