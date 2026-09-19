@@ -1,26 +1,44 @@
 # STRATA — Distributed Hybrid Search Engine
 
-STRATA is a search engine built from the search fundamentals up rather than around an existing search platform. It started with text analysis, an inverted index, and BM25, and has grown into a distributed system with persistent shards, Kafka-driven indexing, semantic retrieval, hybrid ranking, and a Next.js interface.
+STRATA is a search engine built from search fundamentals rather than around an existing search platform.
 
-The interesting part is not any single algorithm. It is the path between them: how a crawled page becomes a versioned document, how that change reaches an indexer, how the document is assigned to a shard, how lexical and semantic indexes are maintained together, and how several remote shards can contribute to one global result set.
+It started with text analysis, an inverted index, and BM25, and evolved into a distributed search system with persistent shards, Kafka-driven indexing, semantic retrieval, hybrid ranking, and a Next.js interface.
 
-The project is intentionally built as a production-style system for learning and experimentation. It is designed around real service boundaries and failure cases, but it is not presented as a production-scale search service.
+The interesting part is not any single algorithm. It is the path between them:
+
+**How does a crawled page become a versioned document? How does that change reach an indexer? How is the document assigned to a shard? How are lexical and semantic indexes maintained together? And how do multiple remote shards contribute to one global result set?**
+
+STRATA is intentionally built as a production-style distributed systems project for learning, experimentation, and demonstrating real engineering concepts. It is designed around service boundaries, persistence, asynchronous processing, and failure handling rather than being a simple search API wrapper.
 
 ---
 
-## What STRATA Can Do
+## Screenshots
+
+### Home
+
+![STRATA Home](docs/screenshots/demo1.png)
+
+### Search Results
+
+![STRATA Search Results](docs/screenshots/demo2.png)
+
+![STRATA Search Results](docs/screenshots/demo3.png)
+
+---
+
+# What STRATA Can Do
 
 ### Search
 
 * Lexical search with an inverted index and BM25 ranking
-* Semantic search using sentence-transformer embeddings
+* Semantic search using Sentence Transformer embeddings
 * Hybrid lexical + semantic retrieval
 * Distributed candidate expansion before global ranking
 * Global top-k result selection
 * Document deduplication during distributed result merging
 * Deterministic ranking tie-breaking
 
-### Distributed system
+### Distributed System
 
 * Consistent-hash document routing across shards
 * Independent HTTP shard services
@@ -30,7 +48,7 @@ The project is intentionally built as a production-style system for learning and
 * Partial search when some shards fail or time out
 * Strict search mode that rejects incomplete distributed results
 
-### Indexing and persistence
+### Indexing and Persistence
 
 * Same-domain web crawling with URL normalization
 * Document cleaning and PostgreSQL persistence
@@ -42,7 +60,7 @@ The project is intentionally built as a production-style system for learning and
 * Persistent semantic/vector index data alongside lexical index data
 * Bulk bootstrap/reconciliation for missing shard state
 
-### Event-driven indexing
+### Event-Driven Indexing
 
 * Kafka document change events
 * Consumer-group based indexer workers
@@ -63,7 +81,7 @@ The project is intentionally built as a production-style system for learning and
 
 ---
 
-## Architecture
+# Architecture
 
 At a high level, STRATA separates ingestion, durable document storage, asynchronous indexing, shard ownership, distributed retrieval, and presentation.
 
@@ -97,18 +115,18 @@ flowchart TD
 
 A few boundaries are deliberate:
 
-* **PostgreSQL** is the canonical document store. The search indexes are derived state.
-* **Kafka** carries document changes from storage into the indexing workers instead of coupling crawling directly to shard mutation.
+* **PostgreSQL** is the canonical document store. Search indexes are derived state.
+* **Kafka** carries document changes from storage into indexing workers instead of coupling crawling directly to shard mutation.
 * **Indexer workers** analyze and embed documents, then route them to the owning shard.
-* **Shard services** own their local lexical and semantic indexes and their persistent generations.
-* **The search coordinator** treats shards through a common client boundary, so the distributed search path works with remote HTTP shard services.
-* **The Next.js frontend** talks to the Search API through its own server-side API route rather than reaching into the search internals directly.
+* **Shard services** own their local lexical and semantic indexes and persistent generations.
+* **The search coordinator** communicates with shards through a common client boundary.
+* **The Next.js frontend** communicates with the Search API rather than reaching directly into search internals.
 
 ---
 
-## Indexing Workflow
+# Indexing Workflow
 
-A crawled page and a searchable index are intentionally separate stages. Crawling discovers and extracts pages; indexing turns the stored document into search structures.
+A crawled page and a searchable index are intentionally separate stages.
 
 ```mermaid
 flowchart LR
@@ -130,31 +148,63 @@ flowchart LR
 
 ### 1. Crawl
 
-The crawler starts from one or more URLs, stays on the starting domain, removes URL fragments, avoids duplicate URLs, and extracts a page title, main textual content, and links. It also skips Wikipedia `Special:` pages when crawling Wikipedia.
+The crawler starts from one or more URLs, stays on the starting domain, removes URL fragments, avoids duplicate URLs, and extracts a page title, main textual content, and links.
 
-### 2. Process and store
+The crawler also contains handling for Wikipedia-specific pages and skips `Special:` pages when crawling Wikipedia.
 
-The processor currently performs lightweight text cleanup such as whitespace normalization. The resulting document is written to PostgreSQL. Storage determines whether the document is **created**, **updated**, or **unchanged** and maintains its content hash and version.
+### 2. Process and Store
 
-### 3. Publish the change
+The processor performs lightweight text cleanup such as whitespace normalization.
 
-Created and updated documents produce document-change events. The event contains the document identity, URL, content hash, event version, and event type. Unchanged documents do not need another indexing event.
+The resulting document is written to PostgreSQL.
 
-### 4. Consume and index
+Storage determines whether the document is:
 
-Indexer workers consume the Kafka topic as a consumer group. For each event, the worker loads the canonical document from PostgreSQL, analyzes the searchable text, creates an embedding, and routes the document to its owning shard.
+* created
+* updated
+* unchanged
 
-### 5. Persist the shard
+Each document maintains a content hash and version.
 
-A shard maintains both its inverted index and vector index. Mutations are written as a new immutable segment and the shard manifest is atomically replaced to publish the new generation.
+### 3. Publish the Change
 
-There is also a bulk bootstrap path for reconciling PostgreSQL with shards when derived shard state is missing. Normal document changes still follow the Kafka path.
+Created and updated documents produce document-change events.
+
+The event contains information such as:
+
+* document identity
+* URL
+* content hash
+* event version
+* event type
+
+Unchanged documents do not need another indexing event.
+
+### 4. Consume and Index
+
+Indexer workers consume the Kafka topic as a consumer group.
+
+For each event, the worker:
+
+1. Loads the canonical document from PostgreSQL.
+2. Analyzes the searchable text.
+3. Generates a semantic embedding.
+4. Determines the owning shard.
+5. Updates the shard's lexical and semantic indexes.
+
+### 5. Persist the Shard
+
+A shard maintains both its inverted index and vector index.
+
+Mutations are written as a new immutable segment and the shard manifest is atomically replaced to publish the new generation.
+
+There is also a bulk bootstrap path for reconciling PostgreSQL with shards when derived shard state is missing.
 
 ---
 
-## Lexical Search
+# Lexical Search
 
-The lexical path is deliberately conventional:
+The lexical search path is deliberately built from classical information retrieval concepts:
 
 ```text
 User Query
@@ -170,19 +220,42 @@ BM25
 Ranked Results
 ```
 
-`TextAnalyzer` normalizes Unicode, tokenizes text, removes a built-in English stopword set, and applies the NLTK Snowball English stemmer. The same analysis approach is used for indexed document text and search queries.
+`TextAnalyzer` performs:
 
-The inverted index stores postings for each term, including term frequency and positions, along with document lengths. `BM25Ranker` then scores the retrieved candidates using document frequency, term frequency, document length, and the average document length of the local index.
+* Unicode normalization
+* tokenization
+* stopword removal
+* English Snowball stemming
 
-In the distributed system, this ranking happens locally at each shard before the coordinator merges the returned candidates.
+The same analysis approach is used for indexed document text and search queries.
+
+The inverted index stores postings for each term, including term frequency and positions, along with document lengths.
+
+`BM25Ranker` then scores retrieved candidates using:
+
+* term frequency
+* document frequency
+* document length
+* average document length
+* BM25 parameters
+
+In the distributed system, ranking is performed locally at each shard before the coordinator merges returned candidates.
 
 ---
 
-## Semantic Search
+# Semantic Search
 
-STRATA uses a **Sentence Transformer** model to turn document text and search queries into vectors. The default implementation uses `sentence-transformers/all-MiniLM-L6-v2` and generates normalized embeddings.
+STRATA uses a **Sentence Transformer** model to transform document text and search queries into vectors.
 
-### Document indexing
+The current implementation uses:
+
+```text
+sentence-transformers/all-MiniLM-L6-v2
+```
+
+and generates normalized embeddings.
+
+## Document Indexing
 
 ```mermaid
 flowchart LR
@@ -191,7 +264,7 @@ flowchart LR
     VECTOR --> INDEX[Shard Vector Index]
 ```
 
-### Query retrieval
+## Query Retrieval
 
 ```mermaid
 flowchart LR
@@ -201,17 +274,29 @@ flowchart LR
     SEARCH --> RESULTS[Semantic Candidates]
 ```
 
-The coordinator embeds a semantic query once and sends that vector to the participating shards. Each shard performs exact nearest-neighbor search using cosine similarity over its local `VectorIndex`.
+The coordinator embeds a semantic query once and sends that vector to the participating shards.
 
-There is **no external vector database** in the current implementation. Embeddings are stored with the shard's persistent index data and restored when the shard loads its published generation. The vector index is an in-memory structure at runtime, persisted through the shard segment format.
+Each shard performs nearest-neighbor retrieval using cosine similarity over its local `VectorIndex`.
 
-The current implementation favors correctness and a simple interface over approximate-nearest-neighbor performance. That leaves room for a future ANN implementation without changing the higher-level search contract.
+### No External Vector Database
+
+STRATA currently does **not** use a separate vector database.
+
+Embeddings are stored as part of the shard's persistent index data.
+
+The vector index is loaded into memory when a shard starts, while its persistent state is stored through the shard's segment format.
+
+This keeps semantic retrieval aligned with the existing shard architecture rather than introducing another external infrastructure dependency.
+
+The current implementation favors correctness and a simple architecture over approximate-nearest-neighbor performance.
+
+That leaves room for a future ANN implementation without changing the higher-level search contract.
 
 ---
 
-## Hybrid Search
+# Hybrid Search
 
-Hybrid search is where the lexical and semantic paths meet.
+Hybrid search is where lexical and semantic retrieval meet.
 
 ```mermaid
 flowchart TD
@@ -232,19 +317,69 @@ flowchart TD
     TOP --> UI[Search Results]
 ```
 
-Lexical retrieval is useful when the query and document share important terms. Semantic retrieval can connect text that expresses a similar idea without sharing the same wording. STRATA keeps both signals instead of forcing one retrieval method to handle every query.
+Lexical retrieval is useful when the query and document share important terms.
 
-The current `HybridRanker` independently min-max normalizes lexical and semantic scores, then combines them with configurable lexical and semantic weights. The default weights are equal after normalization. Documents missing from one retrieval source receive `0.0` for that source.
+Semantic retrieval can connect text that expresses a similar idea without sharing the same wording.
 
-Distributed hybrid search expands the per-shard candidate window before the final ranking stage. The current policy requests `max(final_limit × 5, 50)` candidates per shard by default, with an optional maximum. This is an explicit oversampling strategy: returning only the final `K` results from every shard can hide documents that belong in the global result set.
+STRATA keeps both signals instead of forcing one retrieval method to handle every query.
 
-After retrieval, the coordinator combines candidates from all participating shards. Document IDs are treated as the identity for merging, so the same document appearing more than once is deduplicated before the final global top-k is produced.
+The current `HybridRanker` independently normalizes lexical and semantic scores and then combines them using configurable weights.
+
+The default weights are equal after normalization.
+
+Documents missing from one retrieval source receive a score of `0.0` for that source.
 
 ---
 
-## Distributed Search
+# Distributed Hybrid Search
 
-A search request is fanned out to the configured shards and their results are merged centrally.
+Distributed hybrid search requires more than simply asking every shard for the final `K` results.
+
+If every shard only returns `K` results, a document that should belong in the global top-k may be hidden behind other local results.
+
+STRATA therefore performs **candidate expansion** before the final global ranking stage.
+
+The current default policy requests:
+
+```text
+max(final_limit × 5, 50)
+```
+
+candidates per shard, with an optional maximum.
+
+This provides an oversampling window that gives the coordinator more candidates to work with before producing the final global ranking.
+
+The distributed flow is:
+
+```mermaid
+flowchart TD
+    Q[User Query]
+
+    Q --> SHARDS[All Available Shards]
+
+    SHARDS --> L1[Shard Lexical Retrieval]
+    SHARDS --> S1[Shard Semantic Retrieval]
+
+    L1 --> C1[Expanded Candidate Set]
+    S1 --> C1
+
+    C1 --> MERGE[Coordinator Candidate Merge]
+
+    MERGE --> DEDUP[Document Deduplication]
+    DEDUP --> NORM[Score Normalization]
+    NORM --> HYBRID[Hybrid Ranking]
+    HYBRID --> TOPK[Global Top-K]
+```
+
+After retrieval, the coordinator combines candidates from all participating shards.
+
+Document IDs are treated as the document identity for merging, so the same document appearing on multiple shards is deduplicated before the final global ranking.
+
+---
+
+# Distributed Search
+
+A search request is fanned out to configured shards and their results are merged centrally.
 
 ```mermaid
 flowchart TD
@@ -268,62 +403,90 @@ flowchart TD
     K --> API[Search API]
 ```
 
-Documents are assigned to shards using a deterministic SHA-256 based consistent-hash ring with virtual nodes. The same routing abstraction is used by distributed indexers and the shard ownership model.
+Documents are assigned to shards using deterministic SHA-256 based consistent hashing with virtual nodes.
 
-At query time, the coordinator uses remote shard clients and executes shard searches concurrently. Each shard performs its local retrieval and returns a bounded result set. The coordinator then merges those responses into the global response returned by the Search API.
+The same routing abstraction is used by distributed indexers and the shard ownership model.
 
-The current HTTP service exposes three configured shards by default:
+At query time, the coordinator uses remote shard clients and executes shard searches concurrently.
 
-| Shard     | Host port | Internal port |
+Each shard performs local retrieval and returns a bounded result set.
+
+The coordinator then merges those responses into one global response returned by the Search API.
+
+## Default Shards
+
+| Shard     | Host Port | Internal Port |
 | --------- | --------: | ------------: |
 | `shard-0` |    `8100` |        `8001` |
 | `shard-1` |    `8101` |        `8001` |
 | `shard-2` |    `8102` |        `8001` |
 
-The shard services are independently addressable. The coordinator does not need to own the shard's index implementation; it only depends on the shard search contract.
+The shard services are independently addressable.
+
+The coordinator does not need to own the shard's index implementation; it only depends on the shard search contract.
 
 ---
 
-## Failure Handling
+# Failure Handling
 
-Distributed search is useful only if the system has a defined answer for partial failure. STRATA currently handles failure at both the indexing and query layers.
+Distributed search is useful only if the system has defined behavior for partial failure.
 
-### Query-side failures
+STRATA handles failure at both the indexing and query layers.
 
-For each shard, the coordinator tracks success, failure, and timeout separately. Remote shard errors can be retried when the client marks them as retryable, and retries are bounded by the coordinator's configuration.
+## Query-Side Failures
 
-The coordinator supports two behaviors:
+For each shard, the coordinator tracks:
 
-* **Partial mode:** successful shard results remain usable when another shard fails or times out. The API marks the response as partial and reports shard failure/timeout counts.
-* **Strict mode:** any shard failure or timeout causes the distributed search to fail instead of returning an incomplete result set.
+* success
+* failure
+* timeout
 
-The frontend surfaces this state rather than silently presenting an incomplete response as if every shard answered successfully.
+Remote shard errors can be retried when the client marks them as retryable, and retries are bounded by configuration.
 
-### Indexing-side failures
+The coordinator supports two behaviors.
 
-Kafka consumers use manual offset commits. A successfully processed event is committed only after the indexing workflow records the relevant state.
+### Partial Mode
 
-The worker protects against common at-least-once delivery problems with:
+Successful shard results remain usable when another shard fails or times out.
 
-* processed event IDs for exact duplicate protection
-* document/indexed-version tracking for stale event protection
-* document version and content-hash validation
+The API marks the response as partial and reports shard failure or timeout information.
+
+### Strict Mode
+
+Any shard failure or timeout causes the distributed search to fail instead of returning an incomplete result set.
+
+The frontend surfaces this state rather than silently presenting an incomplete response as a fully successful query.
+
+## Indexing-Side Failures
+
+Kafka consumers use manual offset commits.
+
+The worker protects against common at-least-once delivery problems using:
+
+* processed event IDs
+* indexed document versions
+* document versions
+* content hashes
 * bounded event retries
-* a dead-letter topic for events that still cannot be processed
+* dead-letter queue handling
 
 This matters when events arrive more than once or when an older event is delivered after a newer document version has already been indexed.
 
-### Persistent recovery
+## Persistent Recovery
 
-Each shard publishes a manifest pointing at its active immutable segment generation. Segment data is written before the manifest is replaced, and the manifest replacement is atomic. On startup, a shard loads the currently published generation and restores both lexical and semantic index state.
+Each shard publishes a manifest pointing at its active immutable segment generation.
 
-The design therefore treats the manifest as the publication point for a shard generation rather than relying on an in-memory index surviving process restarts.
+Segment data is written before the manifest is replaced, and manifest replacement is atomic.
+
+On startup, the shard loads the currently published generation and restores both lexical and semantic index state.
+
+The manifest therefore acts as the publication point for a shard generation.
 
 ---
 
-## End-to-End Search Workflow
+# End-to-End Search Workflow
 
-From the user's perspective, the full path looks like this:
+From the user's perspective, the complete search path looks like this:
 
 ```mermaid
 flowchart TD
@@ -352,51 +515,125 @@ The API supports three search modes:
 | `semantic` | Sentence Transformer embeddings + cosine similarity |
 | `hybrid`   | Lexical + semantic retrieval + score fusion         |
 
-The frontend requests document metadata as part of its search call so results can display the crawled title, URL, and a deterministic content snippet.
+The frontend requests document metadata as part of its search call so results can display:
+
+* crawled title
+* URL
+* favicon
+* deterministic content snippet
+* search metadata
+* shard status
 
 ---
 
-## Five-Phase Development
+# Five-Phase Development
 
-The project has been built in five phases. The phase names below are kept from the original project plan so the repository history remains easy to follow.
+The project has been built progressively in five phases.
 
-### Phase 1 — Search Engine Fundamentals
+The original phase structure is intentionally preserved because the repository history contains commits corresponding to these milestones.
 
-Built the classical search foundation: text analysis, inverted indexing, term statistics, BM25 ranking, query handling, and the initial Search API.
+## Phase 1 — Search Engine Fundamentals
+
+Built the classical search foundation:
+
+* text analysis
+* inverted indexing
+* term statistics
+* BM25 ranking
+* query handling
+* initial Search API
 
 **Outcome:** a working local lexical search engine built from first principles.
 
-### Phase 2 — Scalable Search Foundation
+---
 
-Added crawling, PostgreSQL-backed document storage, change detection, persistent indexes, immutable segments, segment management/merging, sharding, consistent hashing, shard-local search, persistent shard metadata, and recovery.
+## Phase 2 — Scalable Search Foundation
+
+Added:
+
+* web crawling
+* PostgreSQL-backed document storage
+* document change detection
+* persistent indexes
+* immutable segments
+* segment management and merging
+* sharding
+* consistent hashing
+* shard-local search
+* persistent shard metadata
+* recovery
 
 **Outcome:** the search engine became a persistent, sharded system instead of a single in-memory index.
 
-### Phase 3 — Real Distributed System
+---
 
-Introduced Kafka document events, consumer groups, distributed indexer workers, event retries and DLQ handling, idempotency, event-version protection, remote HTTP shard services, distributed query execution, shard health, retries, timeouts, and strict/partial search semantics.
+## Phase 3 — Real Distributed System
 
-**Outcome:** Phase 3 is **complete and frozen**. The system now has real service boundaries for indexing and distributed retrieval rather than only simulating them in one process.
+Introduced:
 
-### Phase 4 — Semantic & Hybrid Search
+* Kafka document events
+* consumer groups
+* distributed indexer workers
+* event retries
+* dead-letter queue handling
+* idempotency
+* event-version protection
+* remote HTTP shard services
+* distributed query execution
+* shard health
+* retries
+* timeouts
+* strict and partial search semantics
 
-Added sentence-transformer embeddings, vector indexes, semantic retrieval, distributed semantic search, hybrid score fusion, distributed candidate expansion, deduplication, and global top-k behavior.
+**Outcome:** Phase 3 is complete and frozen.
 
-**Outcome:** STRATA can search by exact lexical relevance, semantic similarity, or a combination of both.
-
-### Phase 5 — Production, Observability & UX
-
-The original phase covers the final production-style polish around observability, benchmarking, failure testing, documentation, and user experience. The current implementation is focused on the **Next.js search UI and UX layer**, including STRATA branding, search modes, result cards, snippets, and distributed/partial-result status.
-
-Observability, deeper benchmarking, and other production-oriented work remain future scope rather than being presented as completed features.
-
-
+The system now has real service boundaries for indexing and distributed retrieval rather than only simulating them inside one process.
 
 ---
 
-## Project Structure
+## Phase 4 — Semantic & Hybrid Search
 
-The repository is organized around service boundaries rather than putting the whole application inside the Search API.
+Added:
+
+* Sentence Transformer embeddings
+* persistent vector indexes
+* semantic retrieval
+* distributed semantic search
+* hybrid score fusion
+* distributed candidate expansion
+* document deduplication
+* global top-k behavior
+
+**Outcome:** STRATA can search by exact lexical relevance, semantic similarity, or a combination of both.
+
+---
+
+## Phase 5 — Production, Observability & UX
+
+The final phase focuses on production-oriented improvements around:
+
+* observability
+* benchmarking
+* failure testing
+* documentation
+* user experience
+
+The current implementation also includes a functional **Next.js search UI** with:
+
+* STRATA branding
+* multiple search modes
+* search result cards
+* snippets
+* loading and error states
+* distributed/partial-result status
+
+Observability, deeper benchmarking, and additional production-oriented work remain future scope rather than being presented as completed features.
+
+---
+
+# Project Structure
+
+The repository is organized around service boundaries rather than putting the entire application inside the Search API.
 
 ```text
 project/
@@ -424,72 +661,116 @@ project/
 │   └── models/          # SQLAlchemy document/data models
 │
 ├── tests/
-│   └── integration/     # Cross-service and real infrastructure tests
+│   └── integration/     # Cross-service and real 
 │
-├── infrastructure/
-│   └── postgres/        # PostgreSQL-related infrastructure files
-│
-├── architecture.md     # Additional architecture notes
-├── crawl_sites.py      # Host-side crawling/ingestion entry point
+├── architecture.md
+├── crawl_sites.py
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
 └── README.md
 ```
 
-The important distinction is that **PostgreSQL stores canonical documents**, while **shards store derived search state**. Kafka connects those two worlds asynchronously.
+The important distinction is:
+
+**PostgreSQL stores canonical documents, while shards store derived search state.**
+
+Kafka connects those two worlds asynchronously.
 
 ---
 
-## Tech Stack
+# Tech Stack
 
 | Area                     | Technology                                                                        |
 | ------------------------ | --------------------------------------------------------------------------------- |
 | Backend                  | Python 3.12, FastAPI, SQLAlchemy                                                  |
 | Database                 | PostgreSQL 17                                                                     |
 | Messaging                | Apache Kafka 4.0, `confluent-kafka`                                               |
-| Search                   | Inverted index, BM25, semantic retrieval, hybrid ranking                          |
-| NLP / embeddings         | NLTK Snowball Stemmer, Sentence Transformers, `all-MiniLM-L6-v2`                  |
-| Distributed architecture | Sharding, consistent hashing, remote HTTP shard services, distributed coordinator |
-| Persistence              | JSON-based immutable shard segments + atomic manifests                            |
+| Search                   | Inverted Index, BM25, Semantic Retrieval, Hybrid Ranking                          |
+| NLP / Embeddings         | NLTK Snowball Stemmer, Sentence Transformers, `all-MiniLM-L6-v2`                  |
+| Distributed Architecture | Sharding, Consistent Hashing, Remote HTTP Shard Services, Distributed Coordinator |
+| Persistence              | Immutable shard segments + atomic manifests                                       |
 | Frontend                 | Next.js 16, React 19, TypeScript, Tailwind CSS                                    |
 | Containers               | Docker, Docker Compose                                                            |
 | Testing                  | Pytest                                                                            |
 
 ---
 
-## Running STRATA Locally
+# Running STRATA Locally
 
-The repository includes Docker Compose configuration for PostgreSQL, Kafka, three shard services, the indexer worker, bootstrap/reconciliation, and the Search API.
+STRATA uses Docker Compose for the backend infrastructure and services, while the frontend runs locally with Next.js.
 
-### 1. Clone the repository
+## Prerequisites
 
-```bash
-git clone <repository-url>
-cd distributed-search-engine-main
-```
+Make sure you have the following installed:
 
-### 2. Create the Python environment
+* Docker
+* Docker Compose
+* Node.js and npm
+* Python 3.12+
 
-On Windows:
+---
+
+## 1. Clone the Repository
 
 ```cmd
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+git clone https://github.com/deepakMali2005/distributed-search-engine.git
+cd distributed-search-engine
 ```
 
-The Docker image also installs a CPU-only PyTorch build before installing the Python requirements because Sentence Transformers is part of the indexing and search path.
+---
 
-### 3. Start the backend stack
+## 2. Create Your Environment File
+
+The repository includes a `.env.example` file containing the environment variables required by the project.
+
+Create your own `.env` file from the example.
+
+### Windows CMD
+
+```cmd
+copy .env.example .env
+```
+
+### macOS / Linux
+
+```bash
+cp .env.example .env
+```
+
+Then open `.env` and configure the values for your local environment if needed.
+
+> **Do not commit your `.env` file.** It may contain local credentials, database configuration, or other environment-specific values. The `.env.example` file is provided as the safe template to share with the repository.
+
+---
+
+## 3. Start the Backend
+
+From the project root, build and start the Docker Compose stack:
 
 ```cmd
 docker compose up --build -d
 ```
 
-The Compose stack initializes PostgreSQL and Kafka, starts three persistent shard services, starts the Kafka indexer worker, runs index bootstrap/reconciliation, and exposes the Search API on port `8000`.
+This starts the main backend infrastructure and services, including:
 
-The default local endpoints are:
+* PostgreSQL
+* Kafka
+* Kafka initialization
+* Search API
+* Indexer worker
+* Shard 0
+* Shard 1
+* Shard 2
+* Index bootstrap / reconciliation
+
+Check the running containers with:
+
+```cmd
+docker compose ps
+```
+
+The main local endpoints are:
 
 ```text
 Search API : http://localhost:8000
@@ -498,131 +779,308 @@ Shard 1    : http://localhost:8101
 Shard 2    : http://localhost:8102
 ```
 
-The Sentence Transformer model is cached in the shared Docker `model_cache` volume, so the first startup can take longer while the model is downloaded.
+> **Note:** The first startup can take longer because the Sentence Transformer model may need to be downloaded and cached.
 
-### 4. Crawl some documents
+---
 
-The repository includes `crawl_sites.py` for host-side ingestion. With the Docker stack running, its defaults point at the Compose PostgreSQL and Kafka ports.
+## 4. Start the Frontend
 
-For example:
-
-```cmd
-python crawl_sites.py https://example.com --max-pages 10
-```
-
-Multiple starting URLs can be supplied:
-
-```cmd
-python crawl_sites.py https://example.com https://www.python.org --max-pages 10
-```
-
-Or provide one URL per line in a file:
-
-```cmd
-python crawl_sites.py --file sites.txt --max-pages 10
-```
-
-Crawled documents are stored in PostgreSQL, and created/updated documents are published to Kafka. Indexer workers then consume those events and update the appropriate shard.
-
-### 5. Start the frontend
-
-From the `frontend/` directory:
+Open a **new terminal** and move into the frontend directory:
 
 ```cmd
 cd frontend
+```
+
+Install the frontend dependencies:
+
+```cmd
 npm install
+```
+
+Start the Next.js development server:
+
+```cmd
 npm run dev
 ```
 
-Open:
+The frontend will be available at:
 
 ```text
 http://localhost:3000
 ```
 
-The frontend's Next.js API route forwards searches to `http://localhost:8000` by default. A different backend URL can be supplied with `SEARCH_API_URL`.
+Open that URL in your browser to use STRATA.
 
-### 6. Run the test suite
+---
 
-From the repository root:
+## 5. Crawl Documents
+
+Once the backend is running, documents can be added through the crawler.
+
+From the project root:
+
+```cmd
+python crawl_sites.py https://example.com --max-pages 10
+```
+
+Multiple starting URLs can also be provided:
+
+```cmd
+python crawl_sites.py https://example.com https://www.python.org --max-pages 10
+```
+
+Or use a file containing URLs:
+
+```cmd
+python crawl_sites.py --file sites.txt --max-pages 10
+```
+
+The crawl pipeline is:
+
+```text
+Website
+   ↓
+Crawler
+   ↓
+Processor
+   ↓
+PostgreSQL
+   ↓
+Kafka Document Event
+   ↓
+Indexer Worker
+   ↓
+Consistent Hashing
+   ↓
+Owning Shard
+   ↓
+Lexical + Semantic Index
+```
+
+---
+
+## 6. Run Tests
+
+From the project root:
 
 ```cmd
 pytest -q
 ```
 
-The test suite covers the search fundamentals as well as the distributed system: analyzers, indexes, ranking, semantic embeddings, vector search, Kafka events, event versions, worker behavior, shard persistence, HTTP shard clients, distributed search, failure semantics, and end-to-end integration paths.
+The test suite covers:
+
+* search fundamentals
+* inverted indexing
+* BM25
+* semantic retrieval
+* vector indexing
+* hybrid ranking
+* Kafka events
+* event versions
+* indexer workers
+* shard persistence
+* HTTP shard clients
+* distributed search
+* failure handling
+* strict/partial search
+* end-to-end distributed hybrid search
 
 ---
 
-## Testing
+## Stopping the Project
 
-The tests are organized around the same boundaries as the implementation instead of relying only on one large end-to-end test.
+To stop the Docker Compose services:
 
-Some of the important areas are:
+```cmd
+docker compose down
+```
 
-* **Search fundamentals:** analyzer, query parsing, inverted index, retrieval, BM25 ranking
-* **Persistence:** segments, segment management/merging, shard persistence, manifests, recovery
-* **Sharding:** consistent-hash routing, shard ownership, shard-local search
-* **Semantic search:** embedding models, vector indexes, cosine similarity, semantic retrieval
-* **Hybrid search:** score normalization, fusion, candidate expansion, global top-k, deduplication
-* **Distributed behavior:** coordinator, remote shard clients, HTTP shard services, retries, timeouts, strict/partial search
-* **Event pipeline:** Kafka configuration, producers, consumers, duplicate events, event versions, processed-event tracking, DLQ behavior
-* **Integration:** Kafka workers, shard processes, HTTP search, health checks, persistence across process boundaries, and distributed hybrid search
+To stop the services and remove their associated volumes:
 
-The repository currently contains **65 Python test modules**, including the integration suite. That is a module count, not a claim about the number of individual test cases executed in the latest run.
+```cmd
+docker compose down -v
+```
 
----
-
-## Engineering Highlights
-
-### Derived indexes with a canonical source of truth
-
-PostgreSQL owns the document record. Search indexes are derived state that can be rebuilt or reconciled from the canonical document store. This separation makes indexing failures easier to reason about than treating the search index itself as the primary data store.
-
-### Immutable shard generations
-
-A shard does not overwrite the currently published generation in place. It writes a new segment, creates the next manifest generation, and atomically publishes that manifest. Startup recovery can therefore load the last successfully published generation.
-
-### Event-driven indexing
-
-The crawler does not need to know which shard should receive a document. It stores the document and emits a change event. Indexer workers consume those events, analyze and embed the document, and use consistent hashing to choose the shard.
-
-### At-least-once event safety
-
-Kafka delivery can repeat events or deliver them after another version. Processed-event IDs, indexed document versions, document versions, and content hashes give the worker enough state to reject duplicates and stale events without blindly applying every message.
-
-### Semantic retrieval without a separate vector database
-
-The vector index is part of the shard rather than an external service. This keeps the semantic retrieval path aligned with shard ownership and persistence while leaving the vector-index interface replaceable later.
-
-### Distributed hybrid ranking
-
-The coordinator does more than concatenate shard results. It deliberately expands candidate windows, combines lexical and semantic candidates, normalizes their scores, deduplicates document IDs, and produces one global top-k result set.
-
-### Explicit failure semantics
-
-Timeouts, retryable shard errors, failed shards, and partial results are represented in the search response. This makes distributed failure visible to both API clients and the frontend instead of treating a degraded query as a normal successful response.
+> **Warning:** `docker compose down -v` removes persisted local Docker volumes, including PostgreSQL and service data.
 
 ---
 
-## Roadmap
+# Testing Strategy
 
-The next improvements are mostly about measuring and polishing a system whose core distributed search path is already in place:
+The tests are organized around the same boundaries as the implementation rather than relying only on one large end-to-end test.
+
+### Search Fundamentals
+
+* analyzer
+* query processing
+* inverted index
+* retrieval
+* BM25 ranking
+
+### Persistence
+
+* immutable segments
+* segment management
+* merging
+* shard persistence
+* manifests
+* recovery
+
+### Sharding
+
+* consistent-hash routing
+* shard ownership
+* shard-local search
+
+### Semantic Search
+
+* embedding models
+* vector indexes
+* cosine similarity
+* semantic retrieval
+
+### Hybrid Search
+
+* score normalization
+* score fusion
+* candidate expansion
+* global top-k
+* deduplication
+
+### Distributed Behavior
+
+* coordinator
+* remote shard clients
+* HTTP shard services
+* retries
+* timeouts
+* strict/partial search
+
+### Event Pipeline
+
+* Kafka configuration
+* producers
+* consumers
+* duplicate events
+* event versions
+* processed-event tracking
+* DLQ behavior
+
+### Integration
+
+* Kafka workers
+* shard processes
+* HTTP search
+* health checks
+* persistence across process boundaries
+* distributed hybrid search
+
+---
+
+# Engineering Highlights
+
+## Derived Indexes with a Canonical Source of Truth
+
+PostgreSQL owns the document record.
+
+Search indexes are derived state that can be rebuilt or reconciled from the canonical document store.
+
+This separation makes indexing failures easier to reason about than treating the search index itself as the primary data store.
+
+---
+
+## Immutable Shard Generations
+
+A shard does not overwrite the currently published generation in place.
+
+Instead it:
+
+1. writes a new segment
+2. creates the next manifest generation
+3. atomically publishes the manifest
+
+Startup recovery can therefore load the last successfully published generation.
+
+---
+
+## Event-Driven Indexing
+
+The crawler does not need to know which shard should receive a document.
+
+It stores the document and emits a change event.
+
+Indexer workers consume those events, analyze and embed the document, and use consistent hashing to determine the owning shard.
+
+---
+
+## At-Least-Once Event Safety
+
+Kafka delivery can repeat events or deliver them after another version.
+
+STRATA uses:
+
+* processed-event IDs
+* indexed document versions
+* document versions
+* content hashes
+
+to reject duplicate and stale events without blindly applying every message.
+
+---
+
+## Semantic Retrieval Without a Separate Vector Database
+
+The vector index is part of the shard rather than an external service.
+
+This keeps semantic retrieval aligned with shard ownership and persistence while leaving the vector-index interface replaceable in the future.
+
+---
+
+## Distributed Hybrid Ranking
+
+The coordinator does more than concatenate shard results.
+
+It:
+
+1. expands candidate windows
+2. collects lexical and semantic candidates
+3. normalizes scores
+4. deduplicates documents
+5. performs hybrid ranking
+6. produces the final global top-k
+
+---
+
+## Explicit Failure Semantics
+
+Timeouts, retryable shard errors, failed shards, and partial results are represented in the search response.
+
+This makes distributed failure visible to API clients and the frontend instead of presenting a degraded query as a normal successful response.
+
+---
+
+# Roadmap
+
+Future improvements include:
 
 * Search suggestions / autocomplete
-* Relevance datasets and more systematic ranking evaluation
+* Relevance datasets and systematic ranking evaluation
 * Better query understanding
-* Prometheus/Grafana metrics and structured operational telemetry
+* Prometheus / Grafana metrics
+* Structured operational telemetry
 * Distributed tracing
 * Load and latency benchmarking at larger corpus sizes
 * Further frontend UX improvements
-* Experiments with more advanced vector retrieval or reranking
+* Experiments with more advanced vector retrieval
+* Reranking models
+
+These are future improvements rather than currently completed features.
 
 ---
 
-## Project Story
+# Project Story
 
-STRATA is intentionally built as a progression rather than a collection of disconnected features:
+STRATA was built progressively from information retrieval fundamentals into a distributed hybrid search system.
 
 ```text
 Information Retrieval
@@ -649,7 +1107,15 @@ Hybrid Retrieval + Ranking
         ↓
 Global Top-K
         ↓
-STRATA UI
+Next.js Search Interface
 ```
 
-The goal is to understand the engineering behind a search engine: how documents move through the system, how indexes are built and persisted, how retrieval can be distributed, how different relevance signals can be combined, and what happens when parts of a distributed system are unavailable.
+The project is intentionally focused on understanding and implementing the underlying systems rather than wrapping an existing search engine.
+
+The result is a distributed search engine that combines **classical information retrieval, semantic search, event-driven indexing, persistent sharding, distributed query execution, and a modern web interface** in one system.
+
+---
+
+## License
+
+This project is intended primarily as a learning, experimentation, and portfolio project.
