@@ -69,6 +69,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help=(
+            "Maximum link depth from the starting URL. "
+            "0 crawls only the starting URL, 1 includes direct "
+            "links, and so on. Omit for no depth restriction."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -147,6 +158,7 @@ def validate_url(url: str) -> None:
 def crawl_site(
     url: str,
     max_pages: int,
+    max_depth: int | None,
     event_producer: DocumentEventProducer,
 ) -> tuple[int, int, int]:
     """
@@ -170,6 +182,10 @@ def crawl_site(
     print(
         f"MAX PAGES: {max_pages}"
     )
+    print(
+        f"MAX DEPTH: "
+        f"{max_depth if max_depth is not None else 'unlimited'}"
+    )
     print("=" * 72)
 
     db = SessionLocal()
@@ -179,6 +195,7 @@ def crawl_site(
             db=db,
             start_url=url,
             max_pages=max_pages,
+            max_depth=max_depth,
             event_producer=event_producer,
         )
 
@@ -252,6 +269,11 @@ def main() -> None:
             "--max-pages must be greater than 0."
         )
 
+    if args.max_depth is not None and args.max_depth < 0:
+        raise SystemExit(
+            "--max-depth must be greater than or equal to 0."
+        )
+
     urls = load_urls(
         positional_urls=args.urls,
         url_file=args.file,
@@ -270,6 +292,10 @@ def main() -> None:
     )
     print(
         f"Pages per site : {args.max_pages}"
+    )
+    print(
+        f"Max depth      : "
+        f"{args.max_depth if args.max_depth is not None else 'unlimited'}"
     )
     print(
         f"Kafka          : "
@@ -296,6 +322,7 @@ def main() -> None:
             processed, created, updated = crawl_site(
                 url=url,
                 max_pages=args.max_pages,
+                max_depth=args.max_depth,
                 event_producer=event_producer,
             )
 

@@ -1,8 +1,8 @@
 import requests
 from bs4 import BeautifulSoup
-# from urllib.parse import urljoin
 from collections import deque
 from urllib.parse import urljoin, urlparse, urldefrag
+
 
 class Crawler:
     def fetch(self, url: str) -> str:
@@ -39,12 +39,9 @@ class Crawler:
             timeout=10,
         )
 
-        # Raise an exception for HTTP errors such as:
-        # 403 Forbidden, 404 Not Found, 500 Internal Server Error, etc.
         response.raise_for_status()
 
         return response.text
-
 
     def parse(self, html: str, base_url: str) -> dict:
         """
@@ -77,20 +74,17 @@ class Crawler:
                 }
         """
 
-        # Convert raw HTML into a BeautifulSoup object.
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(
+            html,
+            "html.parser",
+        )
 
-        # Extract the page title.
         title = (
             soup.title.string.strip()
             if soup.title and soup.title.string
             else ""
         )
 
-        # Try to locate the main content of the webpage.
-        #
-        # We check several common HTML structures because
-        # different websites organize their content differently.
         main_content = (
             soup.find("main")
             or soup.find("article")
@@ -101,35 +95,25 @@ class Crawler:
         )
 
         if main_content:
-            # Remove elements that usually contain navigation,
-            # scripts, styles, or other non-document content.
-            #
-            # These elements are not useful for our search index.
             for element in main_content.find_all(
                 ["script", "style", "nav", "footer", "header"]
             ):
                 element.decompose()
 
-            # Extract text from the selected main content area.
             text = main_content.get_text(
                 separator=" ",
                 strip=True,
             )
 
         else:
-            # If no main-content container can be identified,
-            # fall back to the entire page.
             text = soup.get_text(
                 separator=" ",
                 strip=True,
             )
 
-        # Extract all links from the original page.
         links = []
 
         for link in soup.find_all("a", href=True):
-
-            # Convert relative URLs into absolute URLs.
             absolute_url = urljoin(
                 base_url,
                 link["href"],
@@ -142,55 +126,51 @@ class Crawler:
             "text": text,
             "links": links,
         }
-    
-    # def crawl(self, start_url: str, max_pages: int = 10) -> list[dict]:
-    #     queue = deque([start_url])
-    #     visited = set()
-    #     documents = []
 
-    #     while queue and len(visited) < max_pages:
-    #         url = queue.popleft()
-
-    #         if url in visited:
-    #             continue
-
-    #         try:
-    #             html = self.fetch(url)
-    #         except requests.RequestException:
-    #             visited.add(url)
-    #             continue
-
-    #         visited.add(url)
-
-    #         document = self.parse(html, url)
-
-    #         documents.append({
-    #             "url": url,
-    #             "title": document["title"],
-    #             "text": document["text"],
-    #         })
-
-    #         for link in document["links"]:
-    #             if link not in visited:
-    #                 queue.append(link)
-
-    #     return documents
-
-
-    def crawl(self, start_url: str, max_pages: int = 10) -> list[dict]:
+    def crawl(
+        self,
+        start_url: str,
+        max_pages: int = 10,
+        max_depth: int | None = None,
+    ) -> list[dict]:
         """
         Crawl pages starting from `start_url`.
+
+        The crawler uses breadth-first traversal.
+
+        Crawl controls:
+
+            max_pages:
+                Hard maximum number of successfully crawled pages.
+
+            max_depth:
+                Maximum link distance from the starting URL.
+
+                depth 0:
+                    Starting URL only.
+
+                depth 1:
+                    Starting URL + direct links.
+
+                depth 2:
+                    Starting URL + direct links +
+                    links discovered from those pages.
+
+                None:
+                    No depth restriction.
 
         The crawler:
 
             1. Starts from the given URL.
             2. Fetches and parses each page.
-            3. Extracts links from the page.
-            4. Normalizes URLs by removing fragments.
-            5. Only follows links belonging to the same domain.
-            6. Skips Wikipedia special pages.
-            7. Avoids crawling the same URL more than once.
-            8. Stops after `max_pages` pages.
+            3. Tracks the depth of every queued URL.
+            4. Extracts links from each page.
+            5. Normalizes URLs by removing fragments.
+            6. Only follows links belonging to the same domain.
+            7. Skips Wikipedia special pages.
+            8. Avoids crawling the same URL more than once.
+            9. Stops after `max_pages` pages.
+            10. Stops expanding links beyond `max_depth`.
 
         Args:
             start_url:
@@ -199,36 +179,55 @@ class Crawler:
             max_pages:
                 Maximum number of pages to crawl.
 
+            max_depth:
+                Maximum depth from the starting URL.
+                Use None for unlimited depth.
+
         Returns:
             A list of crawled documents.
         """
 
-        # Remove any fragment from the starting URL.
-        #
-        # Example:
-        #
-        # https://example.com/page#section
-        #
-        # becomes:
-        #
-        # https://example.com/page
+        if max_pages <= 0:
+            raise ValueError(
+                "max_pages must be greater than 0."
+            )
+
+        if max_depth is not None and max_depth < 0:
+            raise ValueError(
+                "max_depth must be greater than or equal to 0."
+            )
+
         start_url, _ = urldefrag(start_url)
 
-        queue = deque([start_url])
+        # Each queue entry contains:
+        #
+        #     (url, depth)
+        #
+        # This lets the crawler enforce max_depth while
+        # retaining breadth-first traversal.
+        queue = deque(
+            [(start_url, 0)]
+        )
+
         visited = set()
+
+        # Keep track of URLs already placed into the queue.
+        #
+        # Without this, the same URL can be added many times
+        # when multiple pages link to it.
+        queued = {
+            start_url
+        }
+
         documents = []
 
-        # Extract the domain we are allowed to crawl.
         allowed_domain = urlparse(start_url).netloc
 
         while queue and len(visited) < max_pages:
-            url = queue.popleft()
+            url, depth = queue.popleft()
 
-            # Normalize the URL before checking whether we have
-            # already visited it.
             url, _ = urldefrag(url)
 
-            # Skip URLs that have already been visited.
             if url in visited:
                 continue
 
@@ -239,9 +238,6 @@ class Crawler:
                 continue
 
             # Skip Wikipedia special pages.
-            #
-            # These pages are generally not useful for building
-            # our search index.
             if parsed_url.path.startswith("/wiki/Special:"):
                 visited.add(url)
                 continue
@@ -250,49 +246,62 @@ class Crawler:
                 html = self.fetch(url)
 
             except requests.RequestException as e:
-                print(f"Failed to fetch {url}")
-                print(f"Reason: {e}")
+                print(
+                    f"Failed to fetch {url}"
+                )
+                print(
+                    f"Reason: {e}"
+                )
 
                 visited.add(url)
                 continue
 
             visited.add(url)
 
-            # Parse the HTML into structured document data.
-            document = self.parse(html, url)
+            document = self.parse(
+                html,
+                url,
+            )
 
-            documents.append({
-                "url": url,
-                "title": document["title"],
-                "text": document["text"],
-            })
+            documents.append(
+                {
+                    "url": url,
+                    "title": document["title"],
+                    "text": document["text"],
+                }
+            )
 
-            # Process links discovered on the page.
+            # Do not expand this page if we have reached the
+            # configured maximum depth.
+            if (
+                max_depth is not None
+                and depth >= max_depth
+            ):
+                continue
+
+            next_depth = depth + 1
+
             for link in document["links"]:
 
-                # Remove URL fragments before adding links
-                # to the queue.
-                #
-                # This prevents:
-                #
-                # /wiki/Search_engine
-                # /wiki/Search_engine#bodyContent
-                #
-                # from becoming two separate crawl targets.
                 link, _ = urldefrag(link)
 
                 parsed_link = urlparse(link)
 
-                # Only follow links that:
-                #
-                #   1. belong to the same domain
-                #   2. haven't already been visited
-                #   3. aren't Wikipedia special pages
                 if (
                     parsed_link.netloc == allowed_domain
                     and link not in visited
-                    and not parsed_link.path.startswith("/wiki/Special:")
+                    and link not in queued
+                    and not parsed_link.path.startswith(
+                        "/wiki/Special:"
+                    )
                 ):
-                    queue.append(link)
+                    queue.append(
+                        (
+                            link,
+                            next_depth,
+                        )
+                    )
+
+                    queued.add(link)
 
         return documents

@@ -98,6 +98,7 @@ def crawl_and_store(
     db: Session,
     start_url: str,
     max_pages: int = 10,
+    max_depth: int | None = None,
     indexer: Indexer | None = None,
     event_producer: DocumentEventProducer | None = None,
 ) -> list[PipelineResult]:
@@ -126,6 +127,18 @@ def crawl_and_store(
         max_pages:
             Maximum number of pages to crawl.
 
+        max_depth:
+            Maximum link depth from the starting URL.
+
+            0:
+                Crawl only the starting URL.
+
+            1:
+                Crawl the starting URL and its direct links.
+
+            None:
+                No depth restriction.
+
         indexer:
             Optional synchronous indexer retained temporarily
             during the migration to Kafka-based indexing.
@@ -142,6 +155,7 @@ def crawl_and_store(
     crawled_documents = crawler.crawl(
         start_url=start_url,
         max_pages=max_pages,
+        max_depth=max_depth,
     )
 
     results: list[PipelineResult] = []
@@ -174,10 +188,14 @@ def crawl_and_store(
         #
         # This remains during the migration to the Kafka-based
         # distributed indexing pipeline.
-        if indexer is not None and change_type in {
-            DocumentChangeType.CREATED,
-            DocumentChangeType.UPDATED,
-        }:
+        if (
+            indexer is not None
+            and change_type
+            in {
+                DocumentChangeType.CREATED,
+                DocumentChangeType.UPDATED,
+            }
+        ):
             indexer.index_document(
                 document_id=saved_document.id,
                 content=saved_document.content,
