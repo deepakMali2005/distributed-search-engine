@@ -3,6 +3,10 @@ from bs4 import BeautifulSoup
 from collections import deque
 from urllib.parse import urljoin, urlparse, urldefrag
 
+from sqlalchemy.orm import Session
+
+from services.storage.crawl_storage import CrawlStorage
+
 
 class Crawler:
     def fetch(self, url: str) -> str:
@@ -303,5 +307,175 @@ class Crawler:
                     )
 
                     queued.add(link)
+
+        return documents
+
+    def crawl_resumable(
+    self,
+    db: Session,
+    start_url: str,
+    max_pages: int = 10,
+    max_depth: int | None = None,
+    max_attempts: int = 3,
+) -> list[dict]:
+        """
+        Crawl using a PostgreSQL-backed persistent frontier.
+
+        Unlike ``crawl()``, the frontier survives process restarts.
+
+        ``max_pages`` applies to this invocation only. Running the
+        same crawl again resumes from the persisted frontier.
+        """
+
+        if max_pages <= 0:
+            raise ValueError(
+                "max_pages must be greater than 0."
+            )
+
+        if max_depth is not None and max_depth < 0:
+            raise ValueError(
+                "max_depth must be greater than or equal to 0."
+            )
+
+        if max_attempts <= 0:
+            raise ValueError(
+                "max_attempts must be greater than 0."
+            )
+
+        start_url, _ = urldefrag(
+            start_url
+        )
+
+        allowed_domain = urlparse(
+            start_url
+        ).netloc
+
+        storage = CrawlStorage()
+
+        session = storage.get_or_create_session(
+            db=db,
+            seed_url=start_url,
+            allowed_domain=allowed_domain,
+            max_depth=max_depth,
+        )
+
+        # Recover URLs that were being processed if the
+        # previous process stopped unexpectedly.
+        storage.recover_processing(
+            db=db,
+            crawl_session_id=session.id,
+        )
+
+        # Retry failed URLs while they still have retry capacity.
+        storage.retry_failed(
+            db=db,
+            crawl_session_id=session.id,
+            max_attempts=max_attempts,
+        )
+
+        # Safe because enqueue_url is idempotent.
+        storage.enqueue_url(
+            db=db,
+            crawl_session_id=session.id,
+            url=start_url,
+            depth=0,
+        )
+
+        documents = []
+
+        while len(documents) < max_pages:
+            frontier = storage.claim_next(
+                db=db,
+                crawl_session_id=session.id,
+            )
+
+            if frontier is None:
+                break
+
+            url = frontier.url
+            depth = frontier.depth
+
+            parsed_url = urlparse(url)
+
+            if parsed_url.netloc != allowed_domain:
+                storage.mark_completed(
+                    db=db,
+                    frontier_id=frontier.id,
+                )
+                continue
+
+            if parsed_url.path.startswith(
+                "/wiki/Special:"
+            ):
+                storage.mark_completed(
+                    db=db,
+                    frontier_id=frontier.id,
+                )
+                continue
+
+            try:
+                html = self.fetch(url)
+
+            except requests.RequestException as exc:
+                print(
+                    f"Failed to fetch {url}"
+                )
+                print(
+                    f"Reason: {exc}"
+                )
+
+                storage.mark_failed(
+                    db=db,
+                    frontier_id=frontier.id,
+                    error=str(exc),
+                )
+
+                continue
+
+            document = self.parse(
+                html,
+                url,
+            )
+
+            # Expand the frontier only if we have not reached
+            # the configured maximum depth.
+            if (
+                max_depth is None
+                or depth < max_depth
+            ):
+                next_depth = depth + 1
+
+                for link in document["links"]:
+                    link, _ = urldefrag(
+                        link
+                    )
+
+                    parsed_link = urlparse(
+                        link
+                    )
+
+                    if (
+                        parsed_link.netloc
+                        == allowed_domain
+                        and not parsed_link.path.startswith(
+                            "/wiki/Special:"
+                        )
+                    ):
+                        storage.enqueue_url(
+                            db=db,
+                            crawl_session_id=session.id,
+                            url=link,
+                            depth=next_depth,
+                        )
+
+            documents.append(
+                {
+                    "url": url,
+                    "title": document["title"],
+                    "text": document["text"],
+                    "_frontier_id": frontier.id,
+                    "_crawl_session_id": session.id,
+                }
+            )
 
         return documents

@@ -14,18 +14,6 @@ Flow:
     ├── Document Event Producer → Kafka
     │
     └── Indexer (temporary synchronous compatibility path)
-
-Storage determines whether each document is:
-
-    CREATED
-    UPDATED
-    UNCHANGED
-
-Only CREATED and UPDATED documents produce Kafka events.
-
-The storage layer remains responsible only for persistence and
-change detection. The pipeline coordinates persistence,
-event publication, and the temporary synchronous indexer.
 """
 
 from dataclasses import dataclass
@@ -42,6 +30,7 @@ from services.crawler.crawler import Crawler
 from services.events.producer import DocumentEventProducer
 from services.indexer.indexer import Indexer
 from services.processor.processor import clean_text
+from services.storage.crawl_storage import CrawlStorage
 from services.storage.storage import save_document
 
 
@@ -56,10 +45,6 @@ class PipelineResult:
 
     @property
     def changed(self) -> bool:
-        """
-        Return True when the document changed and needs processing.
-        """
-
         return self.change_type in {
             DocumentChangeType.CREATED,
             DocumentChangeType.UPDATED,
@@ -101,111 +86,132 @@ def crawl_and_store(
     max_depth: int | None = None,
     indexer: Indexer | None = None,
     event_producer: DocumentEventProducer | None = None,
+    resume: bool = False,
 ) -> list[PipelineResult]:
     """
     Crawl, process, store, publish document events, and optionally index.
 
-    CREATED documents:
-        - are published to Kafka as CREATED events
-        - are indexed synchronously when an Indexer is provided
-
-    UPDATED documents:
-        - are published to Kafka as UPDATED events
-        - are re-indexed synchronously when an Indexer is provided
-
-    UNCHANGED documents:
-        - do not produce Kafka events
-        - are not indexed
-
-    Args:
-        db:
-            PostgreSQL database session.
-
-        start_url:
-            URL from which crawling begins.
-
-        max_pages:
-            Maximum number of pages to crawl.
-
-        max_depth:
-            Maximum link depth from the starting URL.
-
-            0:
-                Crawl only the starting URL.
-
-            1:
-                Crawl the starting URL and its direct links.
-
-            None:
-                No depth restriction.
-
-        indexer:
-            Optional synchronous indexer retained temporarily
-            during the migration to Kafka-based indexing.
-
-        event_producer:
-            Optional Kafka document event producer.
-
-            Dependency injection is used here so tests can provide
-            a mock producer without requiring Kafka.
+    When resume=True, the crawler uses the persistent PostgreSQL
+    frontier and resumes previous crawl progress.
     """
 
     crawler = Crawler()
 
-    crawled_documents = crawler.crawl(
-        start_url=start_url,
-        max_pages=max_pages,
-        max_depth=max_depth,
-    )
+    if resume:
+        crawled_documents = crawler.crawl_resumable(
+            db=db,
+            start_url=start_url,
+            max_pages=max_pages,
+            max_depth=max_depth,
+        )
+
+        crawl_storage = CrawlStorage()
+
+    else:
+        crawled_documents = crawler.crawl(
+            start_url=start_url,
+            max_pages=max_pages,
+            max_depth=max_depth,
+        )
+
+        crawl_storage = None
 
     results: list[PipelineResult] = []
 
     for document in crawled_documents:
 
-        processed_text = clean_text(
-            document["text"]
+        frontier_id = document.get(
+            "_frontier_id"
         )
 
-        saved_document, change_type = save_document(
-            db=db,
-            url=document["url"],
-            title=document["title"],
-            content=processed_text,
-            content_type="text/html",
-        )
-
-        # Publish a Kafka event for newly created or changed documents.
-        if event_producer is not None:
-            event = _create_document_event(
-                document=saved_document,
-                change_type=change_type,
+        try:
+            processed_text = clean_text(
+                document["text"]
             )
 
-            if event is not None:
-                event_producer.publish(event)
+            saved_document, change_type = save_document(
+                db=db,
+                url=document["url"],
+                title=document["title"],
+                content=processed_text,
+                content_type="text/html",
+            )
 
-        # Temporary synchronous indexing path.
-        #
-        # This remains during the migration to the Kafka-based
-        # distributed indexing pipeline.
+            if event_producer is not None:
+                event = _create_document_event(
+                    document=saved_document,
+                    change_type=change_type,
+                )
+
+                if event is not None:
+                    event_producer.publish(
+                        event
+                    )
+
+            if (
+                indexer is not None
+                and change_type
+                in {
+                    DocumentChangeType.CREATED,
+                    DocumentChangeType.UPDATED,
+                }
+            ):
+                indexer.index_document(
+                    document_id=saved_document.id,
+                    content=saved_document.content,
+                )
+
+            results.append(
+                PipelineResult(
+                    document=saved_document,
+                    change_type=change_type,
+                )
+            )
+
+            if (
+                resume
+                and crawl_storage is not None
+                and frontier_id is not None
+            ):
+                crawl_storage.mark_completed(
+                    db=db,
+                    frontier_id=frontier_id,
+                )
+
+        except Exception as exc:
+
+            if (
+                resume
+                and crawl_storage is not None
+                and frontier_id is not None
+            ):
+                crawl_storage.mark_failed(
+                    db=db,
+                    frontier_id=frontier_id,
+                    error=str(exc),
+                )
+
+            raise
+
+    if (
+        resume
+        and crawl_storage is not None
+        and crawled_documents
+    ):
+        session_id = crawled_documents[0].get(
+            "_crawl_session_id"
+        )
+
         if (
-            indexer is not None
-            and change_type
-            in {
-                DocumentChangeType.CREATED,
-                DocumentChangeType.UPDATED,
-            }
+            session_id is not None
+            and crawl_storage.pending_count(
+                db=db,
+                crawl_session_id=session_id,
+            ) == 0
         ):
-            indexer.index_document(
-                document_id=saved_document.id,
-                content=saved_document.content,
+            crawl_storage.mark_session_completed(
+                db=db,
+                crawl_session_id=session_id,
             )
-
-        results.append(
-            PipelineResult(
-                document=saved_document,
-                change_type=change_type,
-            )
-        )
 
     return results

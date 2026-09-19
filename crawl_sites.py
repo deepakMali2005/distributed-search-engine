@@ -5,12 +5,6 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-#
-# When this script runs directly on the host while Docker Compose
-# is running, these are the host-side ports exposed by docker-compose.
-#
-# Existing environment variables always take precedence.
-#
 os.environ.setdefault(
     "DATABASE_URL",
     "postgresql+psycopg2://search_user:search_password@localhost:5433/search_engine",
@@ -30,6 +24,7 @@ from libs.common.kafka import KafkaConfig
 from services.events.producer import DocumentEventProducer
 from services.pipeline.pipeline import crawl_and_store
 from services.search_api.database import SessionLocal
+from services.storage.crawl_storage import CrawlStorage
 
 
 def parse_args() -> argparse.Namespace:
@@ -80,6 +75,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=(
+            "Use the legacy in-memory crawl frontier instead of "
+            "persistent crawl sessions."
+        ),
+    )
+
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help=(
+            "Delete an existing persistent crawl session for each "
+            "starting URL before crawling."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -119,10 +132,6 @@ def load_urls(
 
                 urls.append(line)
 
-    #
-    # Remove duplicates while preserving the order supplied by
-    # the user.
-    #
     unique_urls: list[str] = []
     seen: set[str] = set()
 
@@ -160,19 +169,11 @@ def crawl_site(
     max_pages: int,
     max_depth: int | None,
     event_producer: DocumentEventProducer,
+    resume: bool,
+    fresh: bool,
 ) -> tuple[int, int, int]:
-    """
-    Crawl one starting URL.
 
-    Returns:
-        processed_count,
-        created_count,
-        updated_count
-    """
-
-    validate_url(
-        url
-    )
+    validate_url(url)
 
     print()
     print("=" * 72)
@@ -191,12 +192,20 @@ def crawl_site(
     db = SessionLocal()
 
     try:
+        if fresh and resume:
+            CrawlStorage().delete_session(
+                db=db,
+                seed_url=url,
+                max_depth=max_depth,
+            )
+
         results = crawl_and_store(
             db=db,
             start_url=url,
             max_pages=max_pages,
             max_depth=max_depth,
             event_producer=event_producer,
+            resume=resume,
         )
 
         created = sum(
@@ -285,7 +294,9 @@ def main() -> None:
         )
 
     print("=" * 72)
-    print("DISTRIBUTED SEARCH ENGINE - CRAWLER")
+    print(
+        "DISTRIBUTED SEARCH ENGINE - CRAWLER"
+    )
     print("=" * 72)
     print(
         f"Sites to crawl : {len(urls)}"
@@ -298,14 +309,15 @@ def main() -> None:
         f"{args.max_depth if args.max_depth is not None else 'unlimited'}"
     )
     print(
+        f"Resume mode    : "
+        f"{'disabled' if args.no_resume else 'enabled'}"
+    )
+    print(
         f"Kafka          : "
         f"{os.getenv('KAFKA_BOOTSTRAP_SERVERS')}"
     )
     print()
 
-    #
-    # One producer is reused for the complete crawl run.
-    #
     kafka_config = KafkaConfig.from_environment()
 
     event_producer = DocumentEventProducer(
@@ -324,6 +336,8 @@ def main() -> None:
                 max_pages=args.max_pages,
                 max_depth=args.max_depth,
                 event_producer=event_producer,
+                resume=not args.no_resume,
+                fresh=args.fresh,
             )
 
             total_processed += processed
@@ -349,7 +363,9 @@ def main() -> None:
 
     print()
     print("=" * 72)
-    print("CRAWL RUN COMPLETE")
+    print(
+        "CRAWL RUN COMPLETE"
+    )
     print("=" * 72)
     print(
         f"Sites attempted : {len(urls)}"
