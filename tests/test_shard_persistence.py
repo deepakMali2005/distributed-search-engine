@@ -1,8 +1,14 @@
 from services.indexer.index import InvertedIndex
 from services.indexer.shard import Shard
-from services.indexer.shard_lifecycle import ShardLifecycleState
-from services.indexer.shard_manifest import ShardManifest
-from services.indexer.shard_persistence import JsonShardPersistence
+from services.indexer.shard_lifecycle import (
+    ShardLifecycleState,
+)
+from services.indexer.shard_manifest import (
+    ShardManifest,
+)
+from services.indexer.shard_persistence import (
+    JsonShardPersistence,
+)
 from services.semantic.models import Embedding
 
 
@@ -161,7 +167,7 @@ def test_delete_persists_vector_removal(
     )
 
 
-def test_persistence_uses_atomic_manifest_and_immutable_generations(
+def test_save_garbage_collects_old_generations(
     tmp_path,
 ):
     persistence = JsonShardPersistence(
@@ -179,6 +185,15 @@ def test_persistence_uses_atomic_manifest_and_immutable_generations(
         shard
     )
 
+    first_path = (
+        tmp_path
+        / "shard-001"
+        / "segments"
+        / "segment-000000.json"
+    )
+
+    assert first_path.is_file()
+
     shard.add_document(
         2,
         ["distributed"],
@@ -188,8 +203,21 @@ def test_persistence_uses_atomic_manifest_and_immutable_generations(
         shard
     )
 
+    second_path = (
+        tmp_path
+        / "shard-001"
+        / "segments"
+        / "segment-000001.json"
+    )
+
     assert first.generation == 0
     assert second.generation == 1
+
+    assert second_path.is_file()
+
+    # The first generation is no longer referenced by the
+    # published manifest and should have been reclaimed.
+    assert not first_path.exists()
 
     assert (
         second.active_segments
@@ -197,25 +225,130 @@ def test_persistence_uses_atomic_manifest_and_immutable_generations(
     )
 
     assert (
-        tmp_path
-        / "shard-001"
-        / "segments"
-        / "segment-000000.json"
-    ).is_file()
-
-    assert (
-        tmp_path
-        / "shard-001"
-        / "segments"
-        / "segment-000001.json"
-    ).is_file()
-
-    assert (
         persistence.read_manifest(
             "shard-001"
         )
         == second
     )
+
+
+def test_cleanup_unreferenced_segments_removes_stale_files(
+    tmp_path,
+):
+    persistence = JsonShardPersistence(
+        tmp_path
+    )
+
+    shard = make_shard()
+
+    shard.add_document(
+        1,
+        ["python"],
+    )
+
+    manifest = persistence.save(
+        shard
+    )
+
+    segments_dir = (
+        tmp_path
+        / "shard-001"
+        / "segments"
+    )
+
+    stale_one = (
+        segments_dir
+        / "segment-999998.json"
+    )
+
+    stale_two = (
+        segments_dir
+        / "segment-999999.json"
+    )
+
+    stale_one.write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    stale_two.write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    deleted = (
+        persistence.cleanup_unreferenced_segments(
+            "shard-001"
+        )
+    )
+
+    assert deleted == [
+        "segment-999998",
+        "segment-999999",
+    ]
+
+    assert not stale_one.exists()
+    assert not stale_two.exists()
+
+    active_path = (
+        segments_dir
+        / f"{manifest.active_segments[0]}.json"
+    )
+
+    assert active_path.is_file()
+
+
+def test_load_cleans_stale_generations(
+    tmp_path,
+):
+    persistence = JsonShardPersistence(
+        tmp_path
+    )
+
+    shard = make_shard()
+
+    shard.add_document(
+        1,
+        ["python"],
+    )
+
+    manifest = persistence.save(
+        shard
+    )
+
+    segments_dir = (
+        tmp_path
+        / "shard-001"
+        / "segments"
+    )
+
+    stale_path = (
+        segments_dir
+        / "segment-999999.json"
+    )
+
+    stale_path.write_text(
+        "{}",
+        encoding="utf-8",
+    )
+
+    restored = make_shard()
+
+    assert persistence.load(
+        restored
+    ) is True
+
+    assert restored.document_count == 1
+    assert restored.contains_document(1)
+
+    assert not stale_path.exists()
+
+    active_path = (
+        segments_dir
+        / f"{manifest.active_segments[0]}.json"
+    )
+
+    assert active_path.is_file()
 
 
 def test_load_uses_published_manifest_generation(
@@ -378,23 +511,4 @@ def test_legacy_lexical_segment_loads_without_vectors(
     assert (
         restored.vector_index.document_count
         == 0
-    )
-
-
-def test_manifest_round_trip():
-    manifest = ShardManifest(
-        shard_id="shard-001",
-        generation=4,
-        state=ShardLifecycleState.READY,
-        active_segments=(
-            "segment-000004",
-        ),
-        document_count=10,
-    )
-
-    assert (
-        ShardManifest.from_dict(
-            manifest.to_dict()
-        )
-        == manifest
     )

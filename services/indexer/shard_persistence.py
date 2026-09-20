@@ -25,12 +25,15 @@ class JsonShardPersistence:
     The manifest therefore remains the publication point for a shard
     generation.
 
-    Older segments remain on disk until an explicit cleanup policy is
-    added.
+    Only segments referenced by the published manifest are retained.
+    Older unreferenced generations are garbage-collected after the
+    new manifest has been published successfully.
     """
 
     MANIFEST_NAME = "manifest.json"
     SEGMENTS_DIRECTORY = "segments"
+    SEGMENT_SUFFIX = ".json"
+    TEMP_SEGMENT_SUFFIX = ".json.tmp"
 
     def __init__(
         self,
@@ -46,6 +49,12 @@ class JsonShardPersistence:
 
     def manifest_path(self, shard_id: str) -> Path:
         return self.shard_directory(shard_id) / self.MANIFEST_NAME
+
+    def segments_directory(self, shard_id: str) -> Path:
+        return (
+            self.shard_directory(shard_id)
+            / self.SEGMENTS_DIRECTORY
+        )
 
     def exists(self, shard_id: str) -> bool:
         return self.manifest_path(shard_id).is_file()
@@ -70,12 +79,28 @@ class JsonShardPersistence:
         return manifest
 
     def save(self, shard: Shard) -> ShardManifest:
-        """Persist the complete current shard state."""
-        shard.set_lifecycle_state(ShardLifecycleState.PERSISTING)
+        """
+        Persist the complete current shard state.
+
+        The new segment is written first. The manifest is then atomically
+        replaced to publish the new generation. Only after successful
+        publication are obsolete segments removed.
+
+        If cleanup fails, the newly published generation remains valid and
+        stale files can be cleaned up during a later save/load.
+        """
+        shard.set_lifecycle_state(
+            ShardLifecycleState.PERSISTING
+        )
 
         try:
-            shard_dir = self.shard_directory(shard.shard_id)
-            segments_dir = shard_dir / self.SEGMENTS_DIRECTORY
+            shard_dir = self.shard_directory(
+                shard.shard_id
+            )
+
+            segments_dir = self.segments_directory(
+                shard.shard_id
+            )
 
             segments_dir.mkdir(
                 parents=True,
@@ -111,7 +136,21 @@ class JsonShardPersistence:
                 document_count=shard.document_count,
             )
 
-            self._write_manifest_atomically(manifest)
+            # Publication point.
+            #
+            # Once this succeeds, the new segment is the authoritative
+            # shard generation.
+            self._write_manifest_atomically(
+                manifest
+            )
+
+            # The new generation is now durable and published.
+            # Any previous segment is no longer reachable from the
+            # manifest and can therefore be reclaimed.
+            self.cleanup_unreferenced_segments(
+                shard.shard_id,
+                active_segments=manifest.active_segments,
+            )
 
             shard.set_lifecycle_state(
                 ShardLifecycleState.READY
@@ -126,7 +165,13 @@ class JsonShardPersistence:
             raise
 
     def load(self, shard: Shard) -> bool:
-        """Load the currently published shard generation."""
+        """
+        Load the currently published shard generation.
+
+        After the published generation has been loaded and validated,
+        remove any stale segments left behind by previous generations
+        or interrupted cleanup.
+        """
         if not self.exists(shard.shard_id):
             shard.set_lifecycle_state(
                 ShardLifecycleState.NEW
@@ -145,9 +190,8 @@ class JsonShardPersistence:
             shard.index.clear()
             shard.vector_index.clear()
 
-            segments_dir = (
-                self.shard_directory(shard.shard_id)
-                / self.SEGMENTS_DIRECTORY
+            segments_dir = self.segments_directory(
+                shard.shard_id
             )
 
             for segment_id in manifest.active_segments:
@@ -175,13 +219,26 @@ class JsonShardPersistence:
                     source=snapshot.vector_index,
                 )
 
-            self._validate_vector_ownership(shard)
+            self._validate_vector_ownership(
+                shard
+            )
 
-            if shard.document_count != manifest.document_count:
+            if (
+                shard.document_count
+                != manifest.document_count
+            ):
                 raise ValueError(
                     f"Shard {shard.shard_id} document count "
                     "does not match its manifest."
                 )
+
+            # The shard has been successfully reconstructed from the
+            # published manifest. Only now is it safe to remove stale
+            # generations left on disk.
+            self.cleanup_unreferenced_segments(
+                shard.shard_id,
+                active_segments=manifest.active_segments,
+            )
 
             shard.set_lifecycle_state(
                 ShardLifecycleState.READY
@@ -195,8 +252,70 @@ class JsonShardPersistence:
             )
             raise
 
+    def cleanup_unreferenced_segments(
+        self,
+        shard_id: str,
+        active_segments: tuple[str, ...] | list[str] | None = None,
+    ) -> list[str]:
+        """
+        Delete segment files that are not referenced by the published
+        manifest.
+
+        If active_segments is omitted, the current manifest is read.
+
+        Returns:
+            Segment IDs that were successfully deleted.
+
+        This method is intentionally best-effort. Failure to delete an
+        obsolete segment must not invalidate the already-published
+        manifest or current shard generation.
+        """
+        if not self.exists(shard_id):
+            return []
+
+        if active_segments is None:
+            active_segments = self.read_manifest(
+                shard_id
+            ).active_segments
+
+        active = set(active_segments)
+        segments_dir = self.segments_directory(
+            shard_id
+        )
+
+        if not segments_dir.is_dir():
+            return []
+
+        deleted: list[str] = []
+
+        for path in segments_dir.iterdir():
+            if not path.is_file():
+                continue
+
+            if path.suffix != self.SEGMENT_SUFFIX:
+                continue
+
+            segment_id = path.stem
+
+            if segment_id in active:
+                continue
+
+            try:
+                path.unlink()
+            except OSError:
+                # Cleanup is housekeeping. The manifest has already
+                # established the authoritative state, so an inability
+                # to delete an obsolete file must not fail the shard.
+                continue
+
+            deleted.append(segment_id)
+
+        return sorted(deleted)
+
     def delete(self, shard_id: str) -> bool:
-        directory = self.shard_directory(shard_id)
+        directory = self.shard_directory(
+            shard_id
+        )
 
         if not directory.exists():
             return False
@@ -211,6 +330,7 @@ class JsonShardPersistence:
                 path.rmdir()
 
         directory.rmdir()
+
         return True
 
     def _write_manifest_atomically(
@@ -246,7 +366,9 @@ class JsonShardPersistence:
                 )
 
                 file.flush()
-                os.fsync(file.fileno())
+                os.fsync(
+                    file.fileno()
+                )
 
             os.replace(
                 temp_name,
@@ -254,28 +376,40 @@ class JsonShardPersistence:
             )
 
         finally:
-            if os.path.exists(temp_name):
-                os.unlink(temp_name)
+            if os.path.exists(
+                temp_name
+            ):
+                os.unlink(
+                    temp_name
+                )
 
     @staticmethod
     def _merge_index(
         target: InvertedIndex,
         source: InvertedIndex,
     ) -> None:
-        for doc_id, length in source.document_lengths.items():
+        for doc_id, length in (
+            source.document_lengths.items()
+        ):
             target.set_document_length(
                 doc_id,
                 length,
             )
 
         for term in source.terms:
-            for posting in source.get_postings(term):
+            for posting in source.get_postings(
+                term
+            ):
                 target.set_posting(
                     term,
                     Posting(
                         doc_id=posting.doc_id,
-                        term_frequency=posting.term_frequency,
-                        positions=list(posting.positions),
+                        term_frequency=(
+                            posting.term_frequency
+                        ),
+                        positions=list(
+                            posting.positions
+                        ),
                     ),
                 )
 
@@ -302,10 +436,17 @@ class JsonShardPersistence:
     def _validate_vector_ownership(
         shard: Shard,
     ) -> None:
-        lexical_ids = shard.index.document_ids
-        vector_ids = shard.vector_index.document_ids
+        lexical_ids = (
+            shard.index.document_ids
+        )
 
-        orphaned = vector_ids - lexical_ids
+        vector_ids = (
+            shard.vector_index.document_ids
+        )
+
+        orphaned = (
+            vector_ids - lexical_ids
+        )
 
         if orphaned:
             raise ValueError(
