@@ -87,39 +87,60 @@ At a high level, STRATA separates ingestion, durable document storage, asynchron
 
 ```mermaid
 flowchart TD
+
     WEB[Web Crawler] --> PROC[Document Processor]
+
     PROC --> DB[(PostgreSQL)]
+
     DB --> EVT[Document Change Event]
+
     EVT --> KAFKA[(Kafka)]
+
     KAFKA --> WORKERS[Indexer Workers]
 
     WORKERS --> ROUTER[Consistent Hash Router]
+
     ROUTER --> S0[Shard 0]
+
     ROUTER --> S1[Shard 1]
+
     ROUTER --> S2[Shard 2]
 
     S0 --> I0[Persistent Lexical + Semantic Index]
+
     S1 --> I1[Persistent Lexical + Semantic Index]
+
     S2 --> I2[Persistent Lexical + Semantic Index]
 
     UI[Next.js / STRATA UI] --> API[Search API]
+
     API --> COORD[Search Coordinator]
+
     COORD --> S0
+
     COORD --> S1
+
     COORD --> S2
 
     COORD --> MERGE[Global Merge + Hybrid Ranking]
+
     MERGE --> API
+
     API --> UI
 ```
 
 A few boundaries are deliberate:
 
 * **PostgreSQL** is the canonical document store. Search indexes are derived state.
+
 * **Kafka** carries document changes from storage into indexing workers instead of coupling crawling directly to shard mutation.
+
 * **Indexer workers** analyze and embed documents, then route them to the owning shard.
+
 * **Shard services** own their local lexical and semantic indexes and persistent generations.
+
 * **The search coordinator** communicates with shards through a common client boundary.
+
 * **The Next.js frontend** communicates with the Search API rather than reaching directly into search internals.
 
 ---
@@ -130,19 +151,33 @@ A crawled page and a searchable index are intentionally separate stages.
 
 ```mermaid
 flowchart LR
+
     A[Web Page] --> B[Crawler]
+
     B --> C[Processor]
+
     C --> D[(PostgreSQL)]
+
     D --> E[Document Change Event]
+
     E --> F[Kafka]
+
     F --> G[Indexer Worker]
+
     G --> H[Text Analyzer]
+
     G --> I[Sentence Transformer]
+
     H --> J[Lexical Tokens]
+
     I --> K[Embedding]
+
     J --> L[Shard Router]
+
     K --> L
+
     L --> M[Owning Shard]
+
     M --> N[Persistent Segment]
 ```
 
@@ -208,15 +243,25 @@ The lexical search path is deliberately built from classical information retriev
 
 ```text
 User Query
+
     ↓
+
 Text Analysis
+
     ↓
+
 Inverted Index
+
     ↓
+
 Candidate Documents
+
     ↓
+
 BM25
+
     ↓
+
 Ranked Results
 ```
 
@@ -259,8 +304,11 @@ and generates normalized embeddings.
 
 ```mermaid
 flowchart LR
+
     DOC[Document Text] --> MODEL[Sentence Transformer]
+
     MODEL --> VECTOR[Normalized Embedding Vector]
+
     VECTOR --> INDEX[Shard Vector Index]
 ```
 
@@ -268,9 +316,13 @@ flowchart LR
 
 ```mermaid
 flowchart LR
+
     QUERY[User Query] --> MODEL[Same Sentence Transformer]
+
     MODEL --> QVECTOR[Query Embedding]
+
     QVECTOR --> SEARCH[Cosine Similarity Search]
+
     SEARCH --> RESULTS[Semantic Candidates]
 ```
 
@@ -300,20 +352,27 @@ Hybrid search is where lexical and semantic retrieval meet.
 
 ```mermaid
 flowchart TD
+
     Q[User Query]
 
     Q --> L[Lexical Retrieval]
+
     Q --> S[Semantic Retrieval]
 
     L --> LC[Lexical Candidates]
+
     S --> SC[Semantic Candidates]
 
     LC --> C[Candidate Pool]
+
     SC --> C
 
     C --> N[Independent Score Normalization]
+
     N --> R[Weighted Hybrid Ranking]
+
     R --> TOP[Global Top-K]
+
     TOP --> UI[Search Results]
 ```
 
@@ -353,21 +412,27 @@ The distributed flow is:
 
 ```mermaid
 flowchart TD
+
     Q[User Query]
 
     Q --> SHARDS[All Available Shards]
 
     SHARDS --> L1[Shard Lexical Retrieval]
+
     SHARDS --> S1[Shard Semantic Retrieval]
 
     L1 --> C1[Expanded Candidate Set]
+
     S1 --> C1
 
     C1 --> MERGE[Coordinator Candidate Merge]
 
     MERGE --> DEDUP[Document Deduplication]
+
     DEDUP --> NORM[Score Normalization]
+
     NORM --> HYBRID[Hybrid Ranking]
+
     HYBRID --> TOPK[Global Top-K]
 ```
 
@@ -383,23 +448,33 @@ A search request is fanned out to configured shards and their results are merged
 
 ```mermaid
 flowchart TD
+
     Q[User Query] --> C[Search Coordinator]
 
     C --> S1[Shard 1]
+
     C --> S2[Shard 2]
+
     C --> S3[Shard 3]
 
     S1 --> R1[Local Results]
+
     S2 --> R2[Local Results]
+
     S3 --> R3[Local Results]
 
     R1 --> M[Global Merge]
+
     R2 --> M
+
     R3 --> M
 
     M --> D[Deduplicate]
+
     D --> H[Hybrid / Final Ranking]
+
     H --> K[Global Top-K]
+
     K --> API[Search API]
 ```
 
@@ -490,20 +565,29 @@ From the user's perspective, the complete search path looks like this:
 
 ```mermaid
 flowchart TD
+
     USER[User] --> UI[STRATA Next.js UI]
+
     UI --> API[Search API]
+
     API --> COORD[Search Coordinator]
 
     COORD --> L[Lexical Retrieval]
+
     COORD --> S[Semantic Retrieval]
 
     L --> C[Distributed Candidate Pool]
+
     S --> C
 
     C --> R[Score Normalization + Hybrid Ranking]
+
     R --> G[Global Top-K + Deduplication]
+
     G --> API
+
     API --> UI
+
     UI --> USER
 ```
 
@@ -661,7 +745,7 @@ project/
 │   └── models/          # SQLAlchemy document/data models
 │
 ├── tests/
-│   └── integration/     # Cross-service and real 
+│   └── integration/     # Cross-service and real
 │
 ├── architecture.md
 ├── crawl_sites.py
@@ -698,7 +782,7 @@ Kafka connects those two worlds asynchronously.
 
 # Running STRATA Locally
 
-STRATA uses Docker Compose for the backend infrastructure and services, while the frontend runs locally with Next.js.
+STRATA is fully containerized for local deployment. The backend services and the Next.js frontend run as separate Docker containers.
 
 ## Prerequisites
 
@@ -715,6 +799,7 @@ Make sure you have the following installed:
 
 ```cmd
 git clone https://github.com/deepakMali2005/distributed-search-engine.git
+
 cd distributed-search-engine
 ```
 
@@ -744,15 +829,19 @@ Then open `.env` and configure the values for your local environment if needed.
 
 ---
 
-## 3. Start the Backend
+## 3. Start STRATA with Docker Compose
 
-From the project root, build and start the Docker Compose stack:
+STRATA is fully containerized for local deployment. The backend services and the Next.js frontend run as separate Docker containers.
+
+The Docker Compose configuration uses pre-built STRATA images published to Docker Hub. From the project root, pull the images and start the complete stack:
 
 ```cmd
-docker compose up --build -d
+docker compose pull
+
+docker compose up -d
 ```
 
-This starts the main backend infrastructure and services, including:
+This starts:
 
 * PostgreSQL
 * Kafka
@@ -763,44 +852,12 @@ This starts the main backend infrastructure and services, including:
 * Shard 1
 * Shard 2
 * Index bootstrap / reconciliation
+* Next.js frontend
 
 Check the running containers with:
 
 ```cmd
 docker compose ps
-```
-
-The main local endpoints are:
-
-```text
-Search API : http://localhost:8000
-Shard 0    : http://localhost:8100
-Shard 1    : http://localhost:8101
-Shard 2    : http://localhost:8102
-```
-
-> **Note:** The first startup can take longer because the Sentence Transformer model may need to be downloaded and cached.
-
----
-
-## 4. Start the Frontend
-
-Open a **new terminal** and move into the frontend directory:
-
-```cmd
-cd frontend
-```
-
-Install the frontend dependencies:
-
-```cmd
-npm install
-```
-
-Start the Next.js development server:
-
-```cmd
-npm run dev
 ```
 
 The frontend will be available at:
@@ -810,6 +867,30 @@ http://localhost:3000
 ```
 
 Open that URL in your browser to use STRATA.
+
+The main backend endpoints are:
+
+```text
+Search API : http://localhost:8000
+
+Shard 0    : http://localhost:8100
+
+Shard 1    : http://localhost:8101
+
+Shard 2    : http://localhost:8102
+```
+
+The frontend communicates with the Search API through the Docker Compose network. The browser only needs to access the frontend at `http://localhost:3000`.
+
+The application images used by Compose are:
+
+```text
+deepakashokmali/strata:1.0.0
+
+deepakashokmali/strata-frontend:1.0.0
+```
+
+> **Note:** The first startup can take longer because the Sentence Transformer model may need to be downloaded and cached.
 
 ---
 
@@ -839,21 +920,37 @@ The crawl pipeline is:
 
 ```text
 Website
+
    ↓
+
 Crawler
+
    ↓
+
 Processor
+
    ↓
+
 PostgreSQL
+
    ↓
+
 Kafka Document Event
+
    ↓
+
 Indexer Worker
+
    ↓
+
 Consistent Hashing
+
    ↓
+
 Owning Shard
+
    ↓
+
 Lexical + Semantic Index
 ```
 
@@ -889,19 +986,19 @@ The test suite covers:
 
 ## Stopping the Project
 
-To stop the Docker Compose services:
+To stop the Docker Compose services while preserving their persistent volumes:
 
 ```cmd
 docker compose down
 ```
 
-To stop the services and remove their associated volumes:
+To start them again:
 
 ```cmd
-docker compose down -v
+docker compose up -d
 ```
 
-> **Warning:** `docker compose down -v` removes persisted local Docker volumes, including PostgreSQL and service data.
+> **Important:** Do not use `docker compose down -v` unless you intentionally want to delete the persistent Docker volumes. It removes persisted local PostgreSQL, Kafka, and shard data.
 
 ---
 
@@ -1084,29 +1181,53 @@ STRATA was built progressively from information retrieval fundamentals into a di
 
 ```text
 Information Retrieval
+
         ↓
+
 Text Analysis + Inverted Index
+
         ↓
+
 BM25 Search
+
         ↓
+
 Persistent Indexes
+
         ↓
+
 Immutable Segments
+
         ↓
+
 Sharding + Consistent Hashing
+
         ↓
+
 Distributed Search
+
         ↓
+
 Kafka-Based Indexing
+
         ↓
+
 Independent Shard Services
+
         ↓
+
 Semantic Search
+
         ↓
+
 Hybrid Retrieval + Ranking
+
         ↓
+
 Global Top-K
+
         ↓
+
 Next.js Search Interface
 ```
 
