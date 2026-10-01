@@ -86,7 +86,6 @@ services:
 
     environment:
       KAFKA_DOCUMENT_EVENTS_TOPIC: ${KAFKA_DOCUMENT_EVENTS_TOPIC:-document-events}
-
       KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC: ${KAFKA_DOCUMENT_EVENTS_DLQ_TOPIC:-document-events-dlq}
 
     entrypoint:
@@ -119,10 +118,7 @@ services:
 
 
   db-init:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: deepakashokmali/strata:1.0.0
     container_name: search-engine-db-init
     restart: "no"
 
@@ -142,10 +138,7 @@ services:
 
 
   shard-0:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: deepakashokmali/strata:1.0.0
     container_name: search-engine-shard-0
     restart: unless-stopped
 
@@ -184,10 +177,7 @@ services:
 
 
   shard-1:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: deepakashokmali/strata:1.0.0
     container_name: search-engine-shard-1
     restart: unless-stopped
 
@@ -226,10 +216,7 @@ services:
 
 
   shard-2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: deepakashokmali/strata:1.0.0
     container_name: search-engine-shard-2
     restart: unless-stopped
 
@@ -268,10 +255,7 @@ services:
 
 
   indexer-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: deepakashokmali/strata:1.0.0
     container_name: search-engine-indexer-worker
     restart: unless-stopped
 
@@ -329,10 +313,7 @@ services:
 
 
   index-bootstrap:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: deepakashokmali/strata:1.0.0
     container_name: search-engine-index-bootstrap
     restart: "no"
 
@@ -384,10 +365,7 @@ services:
 
 
   search-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-
+    image: deepakashokmali/strata:1.0.0
     container_name: search-engine-search-api
     restart: unless-stopped
 
@@ -441,7 +419,21 @@ services:
         "8000"
       ]
 
+  frontend:
+    image: deepakashokmali/strata-frontend:1.0.0
+    container_name: search-engine-frontend
+    restart: unless-stopped
 
+    depends_on:
+      search-api:
+        condition: service_healthy
+
+    environment:
+      SEARCH_API_URL: http://search-api:8000
+
+    ports:
+      - "3000:3000"
+      
 volumes:
   postgres_data:
   kafka_data:
